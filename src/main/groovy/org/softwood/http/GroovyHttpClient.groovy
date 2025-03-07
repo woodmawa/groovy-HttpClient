@@ -7,6 +7,7 @@ import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.function.Supplier
 
@@ -17,7 +18,7 @@ import java.util.function.Supplier
  */
 
 class GroovyHttpClient implements AutoCloseable  {
-    private final URI baseUrl
+    private final URI host
     private final HttpClient httpClient
     private final CircuitBreaker circuitBreaker
 
@@ -44,20 +45,20 @@ class GroovyHttpClient implements AutoCloseable  {
      * @param failureThreshold Optional circuit breaker failure threshold
      * @param resetTimeoutMs Optional circuit breaker reset timeout in milliseconds
      */
-    GroovyHttpClient(String baseUrl,
+    GroovyHttpClient(String host,
                             Duration connectTimeout = DEFAULT_CONNECT_TIMEOUT,
                             Duration requestTimeout = DEFAULT_REQUEST_TIMEOUT,
                             int failureThreshold = DEFAULT_FAILURE_THRESHOLD,
                             long resetTimeoutMs = DEFAULT_RESET_TIMEOUT_MS) {
 
-        if (!baseUrl) {
+        if (!host) {
             throw new IllegalArgumentException("Base URL cannot be null or empty")
         }
 
         try {
-            this.baseUrl = new URI(baseUrl)
+            this.host = new URI(host)
         } catch (Exception e) {
-            throw new IllegalArgumentException("Invalid URL format: $baseUrl", e)
+            throw new IllegalArgumentException("Invalid URL format: $host", e)
         }
 
         // Create thread factory for virtual threads
@@ -85,6 +86,26 @@ class GroovyHttpClient implements AutoCloseable  {
         )
     }
 
+    /**
+     * take a well formed url and get the host from that and reuse
+     * @param url
+     */
+    GroovyHttpClient (URL url) {
+        if (url) {
+            host = url.host
+            //add regex test for host ?
+        }
+        else {
+            throw new MalformedURLException("null url passed ")
+        }
+
+        GroovyHttpClient(host,
+                DEFAULT_CONNECT_TIMEOUT,
+                DEFAULT_REQUEST_TIMEOUT,
+                DEFAULT_FAILURE_THRESHOLD,
+                DEFAULT_RESET_TIMEOUT_MS)
+
+    }
     //-------------------------------------------------------------------------
     // Asynchronous HTTP Methods
     //-------------------------------------------------------------------------
@@ -395,11 +416,11 @@ class GroovyHttpClient implements AutoCloseable  {
      */
     private URI resolveUri(String path) {
         if (!path) {
-            return baseUrl
+            return host
         }
 
         String pathToUse = path.startsWith('/') ? path.substring(1) : path
-        return URI.create("${baseUrl}${baseUrl.toString().endsWith('/') ? '' : '/'}${pathToUse}")
+        return URI.create("${host}${host.toString().endsWith('/') ? '' : '/'}${pathToUse}")
     }
 
     /**
@@ -442,6 +463,10 @@ class GroovyHttpClient implements AutoCloseable  {
     void close() {
         // HttpClient doesn't have a close method in Java 21, but we can
         // provide a hook for future cleanup operations if needed
+    }
+
+    String toString (path='/') {
+        resolveUri(path).toString()
     }
 
     /**

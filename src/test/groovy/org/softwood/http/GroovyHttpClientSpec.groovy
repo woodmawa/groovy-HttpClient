@@ -2,14 +2,9 @@ package org.softwood.http
 
 import spock.lang.Specification
 import spock.lang.Subject
-import spock.lang.Unroll
 import spock.lang.Shared
 
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
 import java.time.Duration
-import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 
@@ -48,7 +43,7 @@ class GroovyHttpClientSpec extends Specification {
 
         then:
         client != null
-        client.baseUrl.toString() == baseUrl
+        client.host.toString() == baseUrl
     }
 
     def "should throw exception when invalid URL is provided"() {

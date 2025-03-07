@@ -13,7 +13,7 @@ class URLBuilderSpec extends Specification {
         builder.@protocol == 'https'
         builder.@host == null
         builder.@port == null
-        builder.@basePath == ''
+        builder.@path == ''
         builder.@params == [:]
     }
 
@@ -82,11 +82,11 @@ class URLBuilderSpec extends Specification {
         def builder = new URLBuilder()
 
         when:
-        def result = builder.basePath("/api/v1")
+        def result = builder.path("/api/v1")
 
         then:
         result.is(builder)
-        builder.@basePath == "/api/v1"
+        builder.@path == "/api/v1"
     }
 
     def "Adding a single param should return the builder for chaining"() {
@@ -140,7 +140,7 @@ class URLBuilderSpec extends Specification {
         def builder = new URLBuilder("example.com")
                 .protocol("http")
                 .port(8080)
-                .basePath("/api/v1")
+                .path("/api/v1")
                 .param("sort", "asc")
                 .param("page", 1)
 
@@ -168,8 +168,8 @@ class URLBuilderSpec extends Specification {
 
     def "basePath should be properly formatted"() {
         when:
-        def urlWithSlash = new URLBuilder("example.com").basePath("/api").build()
-        def urlWithoutSlash = new URLBuilder("example.com").basePath("api").build()
+        def urlWithSlash = new URLBuilder("example.com").path("/api").build()
+        def urlWithoutSlash = new URLBuilder("example.com").path("api").build()
 
         then:
         urlWithSlash == "https://example.com/api"
@@ -249,7 +249,7 @@ class URLBuilderSpec extends Specification {
         given:
         def builder = new URLBuilder ().with {
             host "api.example.com"
-            basePath "/search"
+            path "/search"
             param "q", "test query"
             param "filters", ["active", "verified"]
             param "range", 1..3

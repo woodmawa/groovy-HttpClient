@@ -9,8 +9,9 @@ class URLBuilder {
     private String protocol = 'https'
     private String host
     private Integer port
-    private String basePath = ''
+    private String path = ''
     private Map<String, Object> params = [:]
+    private urlString = ''
 
     /**
      * Default constructor
@@ -23,6 +24,16 @@ class URLBuilder {
      */
     URLBuilder(String host) {
         this.host = host
+    }
+
+    /**
+     * Sets the base path to attache to the host
+     * @param basePath The base path segment of the URL
+     * @return this builder instance for method chaining
+     */
+    URLBuilder path (String path) {
+        this.path = path
+        return this
     }
 
     /**
@@ -65,15 +76,6 @@ class URLBuilder {
         return this
     }
 
-    /**
-     * Sets the base path
-     * @param basePath The base path segment of the URL
-     * @return this builder instance for method chaining
-     */
-    URLBuilder basePath(String basePath) {
-        this.basePath = basePath
-        return this
-    }
 
     /**
      * Adds a single parameter to the URL
@@ -125,6 +127,16 @@ class URLBuilder {
         }
     }
 
+    boolean isValidURL(String url) throws MalformedURLException, URISyntaxException {
+        try {
+            new URI(url)
+            return true
+        } catch (MalformedURLException e) {
+            return false
+        } catch (URISyntaxException e) {
+            return false
+        }
+    }
     /**
      * Builds the complete URL
      * @return The complete, well-formed URL as a String
@@ -141,11 +153,11 @@ class URLBuilder {
         }
 
         // Handle base path - ensure it starts with a slash if not empty
-        if (basePath) {
-            if (!basePath.startsWith('/')) {
+        if (path) {
+            if (!path.startsWith('/')) {
                 url.append('/')
             }
-            url.append(basePath)
+            url.append(path)
         }
 
         // Add query parameters if any
@@ -154,7 +166,7 @@ class URLBuilder {
             url.append('?').append(queryString)
         }
 
-        return url.toString()
+        return urlString = url.toString()
     }
 
     /**
