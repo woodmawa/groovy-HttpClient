@@ -1,0 +1,22 @@
+plugins {
+    id 'groovy'
+}
+
+group = 'org.softwood'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+//global variables defined in gradle.properties file
+dependencies {
+    implementation group: 'org.apache.groovy', name: 'groovy', version: "$groovyVersion"
+    testImplementation group: 'org.spockframework', name: 'spock-core', version: "$spockVersion"
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+test {
+    useJUnitPlatform()
+}
