@@ -13,10 +13,12 @@ repositories {
 dependencies {
     implementation group: 'org.apache.groovy', name: 'groovy', version: "$groovyVersion"
     testImplementation group: 'org.spockframework', name: 'spock-core', version: "$spockVersion"
+    implementation group: 'net.bytebuddy', name: 'byte-buddy', version: '1.17.2'
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
 }
 
 test {
     useJUnitPlatform()
+
 }
