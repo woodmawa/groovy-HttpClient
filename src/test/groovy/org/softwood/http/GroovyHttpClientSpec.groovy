@@ -157,6 +157,7 @@ class GroovyHttpClientSpec extends Specification {
     def "should perform DELETE request"() {
         given:
         mockServer.addResponse("/items/123", 204, '')
+        mockServer.addDeleteResponse("/items/123", 204, '')
 
         when:
         def response = client.delete("/items/123").get(5, TimeUnit.SECONDS)
@@ -369,6 +370,15 @@ class GroovyHttpClientSpec extends Specification {
                 } else {
                     exchange.sendResponseHeaders(400, 0)
                 }
+                exchange.responseBody.close()
+            }
+        }
+
+        void addDeleteResponse(String path, int statusCode, String body) {
+            handlers["DELETE:$path"] = { exchange ->
+                exchange.responseHeaders.set("Content-Type", "application/json")
+                exchange.sendResponseHeaders(statusCode, body.length())
+                exchange.responseBody.write(body.bytes)
                 exchange.responseBody.close()
             }
         }
