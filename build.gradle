@@ -1,5 +1,7 @@
 plugins {
     id 'groovy'
+    id 'maven-publish'
+    id 'signing'
 }
 
 group = 'org.softwood'
@@ -17,6 +19,90 @@ dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter'
 }
 
+java {
+    withSourcesJar()
+    withJavadocJar()
+}
+
 test {
     useJUnitPlatform()
 }
+
+// Publishing configuration
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+
+            pom {
+                name = project.name
+                description = 'A Groovy library'
+                url = 'https://github.com/yourusername/yourproject'
+
+                licenses {
+                    license {
+                        name = 'The Apache License, Version 2.0'
+                        url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                    }
+                }
+
+                developers {
+                    developer {
+                        id = 'woodmawa'
+                        name = 'William Woodman'
+                        email = 'will.woodman@outlook.com'
+                    }
+                }
+
+                scm {
+                    connection = 'scm:git:git://github.com/woodmawa/groovy-HttpClient.git'
+                    developerConnection = 'scm:git:ssh://github.com/woodmawa/groovy-HttpClient.git'
+                    url = 'https://github.com/woodmawa/groovy-HttpClient'
+                }
+            }
+        }
+    }
+
+    // Configure repositories
+    repositories {
+        // Local Maven repository
+        maven {
+            name = 'localRepo'
+            url = layout.buildDirectory.dir('repo')
+        }
+
+        // Remote Maven repository (conditional configuration based on credentials)
+        maven {
+            name = 'remoteRepo'
+            url = project.hasProperty('remoteRepoUrl') ? project.property('remoteRepoUrl') : "https://repo.example.com/repository/maven-releases/"
+
+            credentials {
+                username = project.findProperty('mavenUsername') ?: System.getenv('MAVEN_USERNAME')
+                password = project.findProperty('mavenPassword') ?: System.getenv('MAVEN_PASSWORD')
+            }
+        }
+    }
+}
+
+// Optional signing configuration for published artifacts
+signing {
+    required { gradle.taskGraph.hasTask("publish") }
+    sign publishing.publications.mavenJava
+}
+
+// Task to publish to the local repository
+tasks.register('publishToLocalRepo') {
+    dependsOn 'publishMavenJavaPublicationToLocalRepoRepository'
+    doLast {
+        println "Published to local repository: ${layout.buildDirectory.dir('repo').get().asFile}"
+    }
+}
+
+// Task to publish to the remote repository
+tasks.register('publishToRemoteRepo') {
+    dependsOn 'publishMavenJavaPublicationToRemoteRepoRepository'
+    doLast {
+        println "Published to remote repository"
+    }
+}
+
