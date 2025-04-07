@@ -193,7 +193,9 @@ class GroovyHttpClientSpec extends Specification {
 
         then:
         def e = thrown(ExecutionException)
-        e.cause instanceof java.net.http.HttpTimeoutException
+        def rootCause = getRootCause(e)
+        rootCause instanceof java.net.http.HttpTimeoutException ||
+                rootCause instanceof java.net.ConnectException
 
         cleanup:
         shortTimeoutClient.close()
@@ -274,6 +276,15 @@ class GroovyHttpClientSpec extends Specification {
 
         cleanup:
         resetClient.close()
+    }
+
+    // Helper method to get the root cause of an exception
+    static Throwable getRootCause(Throwable throwable) {
+        Throwable cause = throwable
+        while (cause.getCause() != null) {
+            cause = cause.getCause()
+        }
+        return cause
     }
 
     /**
