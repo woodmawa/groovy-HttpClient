@@ -5,6 +5,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
@@ -46,10 +47,10 @@ class GroovyHttpClient implements AutoCloseable  {
      * @param resetTimeoutMs Optional circuit breaker reset timeout in milliseconds
      */
     GroovyHttpClient(String host,
-                            Duration connectTimeout = DEFAULT_CONNECT_TIMEOUT,
-                            Duration requestTimeout = DEFAULT_REQUEST_TIMEOUT,
-                            int failureThreshold = DEFAULT_FAILURE_THRESHOLD,
-                            long resetTimeoutMs = DEFAULT_RESET_TIMEOUT_MS) {
+                     Duration connectTimeout = DEFAULT_CONNECT_TIMEOUT,
+                     Duration requestTimeout = DEFAULT_REQUEST_TIMEOUT,
+                     int failureThreshold = DEFAULT_FAILURE_THRESHOLD,
+                     long resetTimeoutMs = DEFAULT_RESET_TIMEOUT_MS) {
 
         if (!host) {
             throw new IllegalArgumentException("Base URL cannot be null or empty")
@@ -133,7 +134,9 @@ class GroovyHttpClient implements AutoCloseable  {
             HttpRequest request = requestBuilder.build()
             return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                     .thenApply({ response ->
-                        checkResponseStatus(response)
+                        if (response.statusCode() >= 400) {
+                            throw new HttpResponseException(response.statusCode(), response.body())
+                        }
                         return response.body()
                     })
         }
@@ -163,7 +166,9 @@ class GroovyHttpClient implements AutoCloseable  {
             HttpRequest request = requestBuilder.build()
             return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                     .thenApply({ response ->
-                        checkResponseStatus(response)
+                        if (response.statusCode() >= 400) {
+                            throw new HttpResponseException(response.statusCode(), response.body())
+                        }
                         return response.body()
                     })
         }
@@ -193,7 +198,9 @@ class GroovyHttpClient implements AutoCloseable  {
             HttpRequest request = requestBuilder.build()
             return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                     .thenApply({ response ->
-                        checkResponseStatus(response)
+                        if (response.statusCode() >= 400) {
+                            throw new HttpResponseException(response.statusCode(), response.body())
+                        }
                         return response.body()
                     })
         }
@@ -222,7 +229,9 @@ class GroovyHttpClient implements AutoCloseable  {
             HttpRequest request = requestBuilder.build()
             return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                     .thenApply({ response ->
-                        checkResponseStatus(response)
+                        if (response.statusCode() >= 400) {
+                            throw new HttpResponseException(response.statusCode(), response.body())
+                        }
                         return response.body()
                     })
         }
@@ -252,7 +261,9 @@ class GroovyHttpClient implements AutoCloseable  {
             HttpRequest request = requestBuilder.build()
             return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                     .thenApply({ response ->
-                        checkResponseStatus(response)
+                        if (response.statusCode() >= 400) {
+                            throw new HttpResponseException(response.statusCode(), response.body())
+                        }
                         return response.body()
                     })
         }
@@ -424,15 +435,6 @@ class GroovyHttpClient implements AutoCloseable  {
     }
 
     /**
-     * Checks the response status and throws an exception if not successful
-     */
-    private void checkResponseStatus(HttpResponse<String> response) {
-        if (response.statusCode() >= 400) {
-            throw new HttpResponseException(response.statusCode(), response.body())
-        }
-    }
-
-    /**
      * Executes an HTTP operation with circuit breaker protection
      */
     private <T> CompletableFuture<T> executeWithCircuitBreaker(Supplier<CompletableFuture<T>> supplier) {
@@ -444,9 +446,13 @@ class GroovyHttpClient implements AutoCloseable  {
 
         try {
             CompletableFuture<T> future = supplier.get()
-            return future.exceptionally({ Throwable throwable ->
-                circuitBreaker.recordFailure()
-                throw throwable
+            return future.handle((result, throwable) -> {
+                if (throwable != null) {
+                    Throwable cause = (throwable instanceof CompletionException) ? throwable.getCause() : throwable
+                    circuitBreaker.recordFailure()
+                    throw cause
+                }
+                return result
             })
         } catch (Exception e) {
             circuitBreaker.recordFailure()
@@ -529,4 +535,3 @@ class GroovyHttpClient implements AutoCloseable  {
         }
     }
 }
-

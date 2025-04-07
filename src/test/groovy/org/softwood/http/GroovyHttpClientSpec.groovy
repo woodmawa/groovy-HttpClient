@@ -252,6 +252,7 @@ class GroovyHttpClientSpec extends Specification {
             resetClient.get("/circuit-reset-test").get(5, TimeUnit.SECONDS)
             resetClient.get("/circuit-reset-test").get(5, TimeUnit.SECONDS)
         } catch (Exception e) {
+            println "exception e was $e.cause, and type $e.cause.class"
             assert e.cause instanceof GroovyHttpClient.HttpResponseException
         }
 
