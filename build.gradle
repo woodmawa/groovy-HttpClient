@@ -11,13 +11,24 @@ repositories {
     mavenCentral()
 }
 
+configurations.all {
+    resolutionStrategy.force 'org.wiremock:wiremock:3.12.1'
+}
+
 //global variables defined in gradle.properties file
 dependencies {
     implementation group: 'org.apache.groovy', name: 'groovy', version: "$groovyVersion"
+    implementation("org.slf4j:slf4j-api:2.0.17")
+    implementation("ch.qos.logback:logback-classic:1.5.18")
+
     testImplementation group: 'org.spockframework', name: 'spock-core', version: "$spockVersion"
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation("net.bytebuddy:byte-buddy:1.17.5")
+    // Add WireMock for HTTP/2 testing
+    testImplementation("org.wiremock:wiremock-standalone:3.12.1")
+    //testImplementation("org.mock-server:mockserver-netty-no-dependencies:5.15.0")
+
 }
 
 java {
