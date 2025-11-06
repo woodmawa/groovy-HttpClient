@@ -19,7 +19,7 @@ configurations.all {
 dependencies {
     implementation group: 'org.apache.groovy', name: 'groovy', version: "$groovyVersion"
     implementation("org.slf4j:slf4j-api:2.0.17")
-    implementation("ch.qos.logback:logback-classic:1.5.18")
+    implementation("ch.qos.logback:logback-classic:1.5.20")
 
     testImplementation group: 'org.spockframework', name: 'spock-core', version: "$spockVersion"
     testImplementation platform('org.junit:junit-bom:5.10.0')
