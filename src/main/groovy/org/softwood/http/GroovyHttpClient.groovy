@@ -64,6 +64,7 @@ class GroovyHttpClient implements AutoCloseable  {
             // Create SSL parameters that don't validate hostnames
             SSLParameters sslParameters = new SSLParameters()
             sslParameters.setEndpointIdentificationAlgorithm(null)
+            sslParameters.setApplicationProtocols(["h2", "http/1.1"] as String[])
 
             // Create the actual client with these settings
             return HttpClient.newBuilder()
@@ -169,8 +170,10 @@ class GroovyHttpClient implements AutoCloseable  {
                 .sslContext(sslContext ?: customSSLContext)
 
         // Create and configure SSLParameters to disable hostname verification
+        //By explicitly setting setApplicationProtocols(["h2", "http/1.1"]), you're telling the SSL handshake to negotiate HTTP/2 ("h2") first, falling back to HTTP/1.1 if needed
         SSLParameters sslParameters = new SSLParameters()
         sslParameters.setEndpointIdentificationAlgorithm(null)
+        sslParameters.setApplicationProtocols(["h2", "http/1.1"] as String[])
         clientBuilder.sslParameters(sslParameters)
 
         // Build the HttpClient
@@ -553,6 +556,16 @@ class GroovyHttpClient implements AutoCloseable  {
     private URI resolveUri(String path) {
         if (!path) {
             return host
+        }
+
+        // NEW: Check if the path is an absolute URL
+        if (path.toLowerCase().startsWith('http://') || path.toLowerCase().startsWith('https://')) {
+            try {
+                return new URI(path)
+            } catch (Exception e) {
+                // Propagate as a clear error
+                throw new IllegalArgumentException("Invalid absolute URL provided as path: $path", e)
+            }
         }
 
         String pathToUse = path.startsWith('/') ? path.substring(1) : path

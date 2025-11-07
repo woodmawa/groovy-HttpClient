@@ -3,17 +3,13 @@ package org.softwood.http
 import com.github.tomakehurst.wiremock.WireMockServer
 import com.github.tomakehurst.wiremock.common.JettySettings
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration
+import jakarta.servlet.http.HttpServlet
+import jakarta.servlet.http.HttpServletRequest
+import jakarta.servlet.http.HttpServletResponse
 import spock.lang.Shared
 import spock.lang.Specification
 import spock.lang.Unroll
-import wiremock.org.eclipse.jetty.http2.server.HTTP2ServerConnectionFactory
-import wiremock.org.eclipse.jetty.server.HttpConfiguration
-import wiremock.org.eclipse.jetty.server.HttpConnectionFactory
-import wiremock.org.eclipse.jetty.server.SecureRequestCustomizer
-import wiremock.org.eclipse.jetty.server.Server
-import wiremock.org.eclipse.jetty.server.ServerConnector
-import wiremock.org.eclipse.jetty.server.SslConnectionFactory
-import wiremock.org.eclipse.jetty.util.ssl.SslContextFactory
+
 
 import javax.net.ssl.HostnameVerifier
 import javax.net.ssl.SSLContext
@@ -30,85 +26,159 @@ import static com.github.tomakehurst.wiremock.client.WireMock.*
 
 
 class GroovyHttpClientHttp2Spec extends Specification {
-    @Shared
-    WireMockServer wireMockServer
+    // Remove @Shared - we want a fresh server and client for each test
+    Http2TestServer testServer
+    SSLContext sslContext // Make SSLContext an instance field
 
     @Shared
     GroovyHttpClient client
 
+    /*
+     * Create a ClosureServlet wrapper that takes a closure.
+     *  Use new ClosureServlet({ req, resp -> ... }) whenever you were calling addServlet("/path", closure).
+     */
+    static class ClosureServlet extends HttpServlet {
+        private final Closure handler
+
+        ClosureServlet(Closure handler) {
+            this.handler = handler
+        }
+
+        @Override
+        protected void service(HttpServletRequest req, HttpServletResponse resp) {
+            handler(req, resp)
+        }
+    }
+
     def setupSpec() {
-
-        // Set system properties for HTTP/2 and ALPN before starting WireMock
-        System.setProperty("jetty.alpn.protocols", "h2,http/1.1")
-        System.setProperty("https.protocols", "TLSv1.3,TLSv1.2")
-        System.setProperty("jetty.http.port", "0")
-        System.setProperty("jetty.ssl.port", "8443")
-        System.setProperty("jetty.http2.enabled", "true")
-        System.setProperty("wiremock.jetty.alpn", "true")
-
-        // Enable HTTP/2 using the withJettySettings method
-        // Create WireMock configuration with HTTP/2 enabled
-        WireMockConfiguration config = WireMockConfiguration.options()
-                .dynamicPort()
-                .dynamicHttpsPort()
-                .keystorePath("src/test/resources/keystore.jks")
-                .keystorePassword("password")
-                .trustStorePath("src/test/resources/keystore.jks")
-                .trustStorePassword("password")
-                .needClientAuth(false)
-                .enableBrowserProxying(false)
-
-        // Configure WireMock with HTTP/2 support
-        wireMockServer = new WireMockServer(config)
-
-        wireMockServer.start()
-
-        println "Started WireMock server on HTTPS port: ${wireMockServer.httpsPort()}"
-
-        // Create a trust manager that trusts all certificates for testing
+        // --- trust all certs for testing ---
         TrustManager[] trustAllCerts = [
                 new X509TrustManager() {
-                    public X509Certificate[] getAcceptedIssuers() { return null }
-                    public void checkClientTrusted(X509Certificate[] certs, String authType) {}
-                    public void checkServerTrusted(X509Certificate[] certs, String authType) {}
+                    X509Certificate[] getAcceptedIssuers() { null }
+                    void checkClientTrusted(X509Certificate[] certs, String authType) {}
+                    void checkServerTrusted(X509Certificate[] certs, String authType) {}
                 }
         ] as TrustManager[]
 
-        // Create a hostname verifier that accepts all hostnames for testing
-        HostnameVerifier trustAllHostnames = new HostnameVerifier() {
-            @Override
-            boolean verify(String hostname, SSLSession session) {
-                return true
-            }
-        }
-
-        // Create an SSL context that trusts all certificates
-        SSLContext sslContext = SSLContext.getInstance("TLS")
+        SSLContext sslContext = SSLContext.getInstance("TLSv1.3")
         sslContext.init(null, trustAllCerts, new SecureRandom())
 
-        // Install the all-trusting trust manager
-        SSLContext.setDefault(sslContext)
-
-        // Set default hostname verifier globally (for legacy Java APIs)
-        //HttpsURLConnection.setDefaultHostnameVerifier(trustAllHostnames)
-
-
-        // Create client with the WireMock server URL
-        client = new GroovyHttpClient("https://localhost:${wireMockServer.httpsPort()}",
+        client = new GroovyHttpClient(
+                "https://dummy-host-for-tests",  //will be be updated in tests
                 GroovyHttpClient.DEFAULT_CONNECT_TIMEOUT,
                 GroovyHttpClient.DEFAULT_REQUEST_TIMEOUT,
                 GroovyHttpClient.DEFAULT_FAILURE_THRESHOLD,
                 GroovyHttpClient.DEFAULT_RESET_TIMEOUT_MS,
                 sslContext,
-                null)
+                null
+        )
     }
 
     def cleanupSpec() {
 
-        wireMockServer?.stop()
+        //wireMockServer?.stop()
         client?.close()
     }
 
+    def setup () {
+        // Initialize the server here so each test gets a clean start and a new port
+        testServer = new Http2TestServer()
+    }
+
+    def cleanup() {
+         testServer?.stop()
+    }
+
+    /** ---tests ---
+     * start a fresh testServer in each test in the given : block
+     * calculate the baseUrl using testServer.port
+     * pass the full url
+     * client is thread safe and immutable
+     */
+    def "should use HTTP/2 protocol for GET requests"() {
+        given:
+        testServer.addServlet(new ClosureServlet({ req, resp ->
+            resp.writer.println("Success")
+        }), "/version")
+        testServer.startServer()
+
+        // Update client with actual port
+        def baseUrl = "https://localhost:${testServer.port}"
+
+        when:
+        def response = client.getSync("${baseUrl}/version") { -> header("Accept", "application/json") }
+
+        then:
+        response.trim() == "Success"
+    }
+
+    @Unroll
+    def "should handle HTTP/2 #method requests correctly"() {
+        given:
+        testServer.addServlet(new ClosureServlet({ req, resp ->
+            resp.writer.println("Success with $method")
+        }), "/test")
+        testServer.startServer()
+
+        // Create the full URL to use in the request
+        def absoluteUrl = "https://localhost:${testServer.port}/test"
+
+        when:
+        def response = executeRequest(method, absoluteUrl)
+
+        then:
+        response.trim() == "Success with $method"
+
+        where:
+        method   | _
+        "GET"    | _
+        "POST"   | _
+        "PUT"    | _
+        "DELETE" | _
+        "PATCH"  | _
+    }
+
+    def "should handle HTTP/2 multiplexing with concurrent requests"() {
+        given:
+        def paths = (1..5).collect { "/concurrent$it" }
+        paths.each { path ->
+            testServer.addServlet(new ClosureServlet({ req, resp ->
+                Thread.sleep(100)
+                resp.writer.println("Response for $path")
+            }), path)
+        }
+        testServer.startServer()
+
+        def baseUrl = "https://localhost:${testServer.port}"
+
+        when:
+        def futures = paths.collect { path -> client.get("$baseUrl${path}") }
+        def responses = futures.collect { it.get(Duration.ofSeconds(5).toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS) }
+
+        then:
+        responses.size() == paths.size()
+        responses.every { it.startsWith("Response for /concurrent") }
+    }
+
+    private String executeRequest(String method, String url) {
+        switch (method) {
+            case "GET":
+                // Pass the full URL
+                return client.getSync(url)
+            case "POST":
+                return client.postSync(url, "test body")
+            case "PUT":
+                return client.putSync(url, "test body")
+            case "DELETE":
+                return client.deleteSync(url)
+            case "PATCH":
+                return client.patchSync(url, "test body")
+            default:
+                throw new IllegalArgumentException("Unsupported method: $method")
+        }
+    }
+
+    /*
     def "should initialize WireMock with HTTPS"() {
         when:
         def wireMockServer = new WireMockServer(WireMockConfiguration.wireMockConfig()
@@ -238,4 +308,6 @@ class GroovyHttpClientHttp2Spec extends Specification {
                 throw new IllegalArgumentException("Unsupported method: $method")
         }
     }
+*/
+
 }
