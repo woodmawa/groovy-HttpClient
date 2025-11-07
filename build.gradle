@@ -61,7 +61,7 @@ publishing {
             pom {
                 name = project.name
                 description = 'A Groovy library'
-                url = 'https://github.com/yourusername/yourproject'
+                url = 'https://github.com/woodmawa/groovy-HttpClient'
 
                 licenses {
                     license {
@@ -96,13 +96,25 @@ publishing {
         }
 
         // Remote Maven repository (conditional configuration based on credentials)
+        // Remote Maven repository (conditional configuration based on credentials)
         maven {
             name = 'remoteRepo'
             url = project.hasProperty('remoteRepoUrl') ? project.property('remoteRepoUrl') : "https://repo.example.com/repository/maven-releases/"
 
-            credentials {
-                username = project.findProperty('mavenUsername') ?: System.getenv('MAVEN_USERNAME')
-                password = project.findProperty('mavenPassword') ?: System.getenv('MAVEN_PASSWORD')
+            // Check if credentials are present before configuring them
+            def user = project.findProperty('mavenUsername') ?: System.getenv('MAVEN_USERNAME')
+            def pass = project.findProperty('mavenPassword') ?: System.getenv('MAVEN_PASSWORD')
+
+            if (user && pass) {
+                credentials {
+                    username = user
+                    password = pass
+                }
+            } else {
+                // If credentials are missing, you can skip configuration
+                // or use a flag to prevent the publish task from being created.
+                // For now, simply finding the properties above is sufficient
+                // as the publish task won't be created unless required properties are met.
             }
         }
     }
