@@ -11,6 +11,11 @@ repositories {
     mavenCentral()
 }
 
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
 /*configurations.all {
     resolutionStrategy.force 'org.wiremock:wiremock:3.13.1'
 }*/

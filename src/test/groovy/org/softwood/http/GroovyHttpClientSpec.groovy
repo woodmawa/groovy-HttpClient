@@ -322,8 +322,17 @@ class GroovyHttpClientSpec extends Specification {
         void addResponse(String path, int statusCode, String body) {
             handlers["GET:$path"] = { exchange ->
                 exchange.responseHeaders.set("Content-Type", "application/json")
-                exchange.sendResponseHeaders(statusCode, body.length())
-                exchange.responseBody.write(body.bytes)
+
+                // FIX: If 204 (No Content), send headers with length 0.
+                // The server implementation will ignore length for 204, but we avoid writing the body.
+                // For other statuses, use body.length().
+                long responseLength = (statusCode == 204) ? -1 : body.length()
+
+                exchange.sendResponseHeaders(statusCode, responseLength)
+
+                if (body) { // Only write the body if it's not empty
+                    exchange.responseBody.write(body.bytes)
+                }
                 exchange.responseBody.close()
             }
         }
@@ -389,8 +398,17 @@ class GroovyHttpClientSpec extends Specification {
         void addDeleteResponse(String path, int statusCode, String body) {
             handlers["DELETE:$path"] = { exchange ->
                 exchange.responseHeaders.set("Content-Type", "application/json")
-                exchange.sendResponseHeaders(statusCode, body.length())
-                exchange.responseBody.write(body.bytes)
+
+                // FIX: If 204 (No Content), send headers with length 0.
+                // The server implementation will ignore length for 204, but we avoid writing the body.
+                // For other statuses, use body.length().
+                long responseLength = (statusCode == 204) ? -1 : body.length()
+
+                exchange.sendResponseHeaders(statusCode, responseLength)
+
+                if (body) {
+                    exchange.responseBody.write(body.bytes)
+                }
                 exchange.responseBody.close()
             }
         }
