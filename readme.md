@@ -17,8 +17,8 @@ A modern, thread-safe HTTP client for Groovy that leverages Java 21's virtual th
 
 Add the `GroovyHttpClient.groovy` file to your project under the `org.softwood.http` package.
 
-or use Gradle publishToMavenLocal target to put the jar in your local ~./m2 repository and then just add mavenLocal()
-
+or use Gradle publishToMavenLocal target to put the jar in your local ~./m2 repository and then just add mavenLocal() 
+to your repositories block  before mavenCentral()
 
 ```groovy
 repositories {
@@ -29,7 +29,6 @@ repositories {
     mavenCentral()
 }
 ```
-to your repositories before mavenCentral()
 
 or include the jar directly from the /build/repo/org/softwood/groovy-HttpClient/1.0-SNAPSHOT in your client project dependencies 
 
