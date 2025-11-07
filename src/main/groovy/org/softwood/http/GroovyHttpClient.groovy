@@ -191,6 +191,66 @@ class GroovyHttpClient implements AutoCloseable  {
         )
     }
 
+    // static createWithOptions map
+    static GroovyHttpClient createWithOptions(String baseUrl, Map<String, Object> options) {
+        // Initialize an instance using reflection or by directly setting fields if possible.
+        GroovyHttpClient client = new GroovyHttpClient(baseUrl)
+
+        // Set properties based on the provided map. Here we assume some common keys.
+        // Use invokeMethod to set values dynamically without exposing them as public
+        ['connectionTimeout', 'requestTimeout', 'circuitBreakerFailureThreshold', 'circuitBreakerResetTimeout'].each { String propertyName ->
+            Long value = (Long) options.getOrDefault(propertyName, null)
+            if (value != null) {
+                client.invokeMethod("set${propertyName.capitalize()}", [value])
+            }
+        }
+
+        return client
+    }
+
+    // Static inner class for building instances using builder style
+    static class Builder {
+        private String baseUrl = 'http://localhost'
+        private Duration connectionTimeout = Duration.ofSeconds(10)
+        private Duration requestTimeout = Duration.ofMinutes(1)
+        private int circuitBreakerFailureThreshold = 5
+        private long circuitBreakerResetTimeout = 10000 // in milliseconds
+
+        Builder setBaseUrl(String baseUrl) {
+            this.baseUrl = baseUrl
+            return this
+        }
+
+        Builder setConnectionTimeout(Duration connectionTimeout) {
+            this.connectionTimeout = connectionTimeout
+            return this
+        }
+
+        Builder setRequestTimeout(Duration requestTimeout) {
+            this.requestTimeout = requestTimeout
+            return this
+        }
+
+        Builder setCircuitBreakerFailureThreshold(int circuitBreakerFailureThreshold) {
+            this.circuitBreakerFailureThreshold = circuitBreakerFailureThreshold
+            return this
+        }
+
+        Builder setCircuitBreakerResetTimeout(long circuitBreakerResetTimeout) {
+            this.circuitBreakerResetTimeout = circuitBreakerResetTimeout
+            return this
+        }
+
+        GroovyHttpClient build() {
+            // Instantiate the class with accumulated parameters
+            return new GroovyHttpClient(baseUrl,
+                    connectionTimeout,
+                    requestTimeout,
+                    circuitBreakerFailureThreshold,
+                    circuitBreakerResetTimeout)
+        }
+    }
+
     /**
      * take a well formed url and get the host from that and reuse
      * @param url

@@ -50,6 +50,105 @@ def client = new GroovyHttpClient(
 )
 ```
 
+### Creating a Client with a builder
+there is also two static methods for creating clients with default timeouts and other configuration details
+To start configuring your GroovyHttpClient, first create an instance of the static inner Builder class:
+
+def httpClientBuilder = GroovyHttpClient.Builder(), then set the options before the final build()
+```groovy
+// Create a new HTTP client instance
+def httpClient = GroovyHttpClient.Builder()
+        .setBaseUrl("https://api.example.com")
+        .setConnectionTimeout(Duration.ofSeconds(10))
+        .setRequestTimeout(Duration.ofMinutes(1))
+        .setCircuitBreakerFailureThreshold(5)
+        .setCircuitBreakerResetTimeout(10000) // 10 seconds
+        .build()
+
+
+```
+
+If you don't set any options, the following defaults will be used:
+
+Base URL: http://localhost
+Connection Timeout: 10 seconds
+Request Timeout: 1 minute
+Circuit Breaker Failure Threshold: 5
+Circuit Breaker Reset Timeout: 10000 milliseconds (10 seconds)
+
+### Creating GroovyHttpClient with Custom Options
+
+The `GroovyHttpClient` class provides a convenient way to create instances with custom options using the `createWithOptions` static factory method. This allows you to set specific configuration properties directly through a Map parameter.
+
+#### Usage Syntax
+
+```groovy
+def httpClient = GroovyHttpClient.createWithOptions(baseUrl, options)
+baseUrl: The base URL for all requests made by this client.
+        options: A map of additional configuration options.
+The options map supports the following keys (all values should be Long type):
+
+Key	Description
+connectionTimeout	Connection timeout in seconds
+requestTimeout	Request timeout in seconds
+circuitBreakerFailureThreshold	Number of failures to open circuit breaker
+circuitBreakerResetTimeout	Circuit reset timeout in milliseconds
+Example Usage
+def options = [
+        connectionTimeout: Duration.ofSeconds(10),
+        requestTimeout: Duration.ofMinutes(2),
+        circuitBreakerFailureThreshold: 7,
+        circuitBreakerResetTimeout: 15000 // 15 seconds
+]
+
+def httpClient = GroovyHttpClient.createWithOptions("https://api.example.com", options)
+Default Values
+
+```
+If any option is not provided in the map, default values will be used:
+
+| Option                         | Default Value                |
+|--------------------------------|------------------------------|
+| `connectionTimeout`            | 10 seconds                   |
+| `requestTimeout`               | 1 minute                     |
+| `circuitBreakerFailureThreshold` | 5                           |
+| `circuitBreakerResetTimeout`     | 10000 milliseconds (10 seconds) |
+
+How It Works
+The method initializes a new GroovyHttpClient instance with the provided base URL. Then, it iterates through the supported option keys and sets each value if present in the options map:
+
+### Creates a new GroovyHttpClient instance using an options map 
+Iterates through the predefined property names (connectionTimeout, requestTimeout, etc.)
+For each property:
+Retrieves its value from the options map (defaulting to null if not found)
+If a non-null value is found, sets it on the client using reflection
+This approach provides flexibility in creating configured clients while keeping the constructor simple.
+
+> [!NOTE]
+> Note on Type Safety
+>While this method accepts Long values for all parameters, you can pass Duration objects or integers that will be implicitly converted. This makes usage more convenient when working with time-related configurations:
+
+#### Usage Syntax
+```groovy
+def httpClient = GroovyHttpClient.createWithOptions(
+        "https://api.example.com",
+        [connectionTimeout: 10, requestTimeout: 120] // values are in seconds
+)
+```
+
+#### Advanced Usage
+You can also use this method to create clients with only specific options set:
+
+```groovy
+// Only setting the circuit breaker properties
+def httpClient = GroovyHttpClient.createWithOptions(
+        "https://api.example.com",
+        [circuitBreakerFailureThreshold: 8, circuitBreakerResetTimeout: 20000]
+)
+```
+
+This method provides a convenient alternative to using the builder pattern when you only need to set specific options without chaining multiple builder methods.
+
 ### Simple GET Request (Synchronous)
 
 ```groovy
