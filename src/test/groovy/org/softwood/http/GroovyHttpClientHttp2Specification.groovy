@@ -1,8 +1,5 @@
 package org.softwood.http
 
-import com.github.tomakehurst.wiremock.WireMockServer
-import com.github.tomakehurst.wiremock.common.JettySettings
-import com.github.tomakehurst.wiremock.core.WireMockConfiguration
 import jakarta.servlet.http.HttpServlet
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
@@ -21,9 +18,6 @@ import java.net.http.HttpResponse
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.time.Duration
-
-import static com.github.tomakehurst.wiremock.client.WireMock.*
-
 
 class GroovyHttpClientHttp2Spec extends Specification {
     // Remove @Shared - we want a fresh server and client for each test
