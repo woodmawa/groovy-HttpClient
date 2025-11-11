@@ -74,4 +74,18 @@ class Http2TestServer {
         if (context == null) throw new IllegalStateException("Server context not initialized")
         context.addServlet(new ServletHolder(servlet), path)
     }
+
+    void waitUntilListening() {
+        def socket = new Socket()
+        for (int i = 0; i < 10; i++) {
+            try {
+                socket.connect(new InetSocketAddress("localhost", port), 100)
+                socket.close()
+                return
+            } catch (IOException ignored) {
+                Thread.sleep(100)
+            }
+        }
+        throw new IllegalStateException("Server did not start listening on port $port in time")
+    }
 }

@@ -30,6 +30,8 @@ class GroovyHttpClient implements AutoCloseable  {
     private final URI host
     private final HttpClient httpClient
     private final CircuitBreaker circuitBreaker
+    // Default headers are Map<String, List<String>>
+    private Map<String, List<String>> defaultHeaders = [:].withDefault { [] }.asSynchronized()
 
     // Thread counter for naming virtual threads
     private static final AtomicInteger threadCounter = new AtomicInteger(0)
@@ -44,6 +46,273 @@ class GroovyHttpClient implements AutoCloseable  {
     // Circuit breaker defaults
     public static final int DEFAULT_FAILURE_THRESHOLD = 5
     public static final long DEFAULT_RESET_TIMEOUT_MS = 30000
+
+    GroovyHttpClient(String baseUrl) {
+        this(baseUrl, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT,
+                DEFAULT_FAILURE_THRESHOLD, DEFAULT_RESET_TIMEOUT_MS, null, null)
+    }
+
+    /**
+     * generic constructor for variable args that then calls the full constructor
+     * @param args
+     */
+    GroovyHttpClient(Object... args) {
+        this(*resolveConstructorArgs(args))
+    }
+
+    // Helper method to compute argument list for delegation
+    private static Object[] resolveConstructorArgs(Object... args) {
+        if (!args) {
+            throw new IllegalArgumentException("Base URL is required")
+        }
+
+        String baseUrl = args[0] as String
+        if (!baseUrl || !baseUrl.startsWith("http")) {
+            throw new IllegalArgumentException("Invalid base URL: $baseUrl")
+        }
+
+        // Defaults
+        Duration connectTimeout = DEFAULT_CONNECT_TIMEOUT
+        Duration requestTimeout = DEFAULT_REQUEST_TIMEOUT
+        Integer failureThreshold = DEFAULT_FAILURE_THRESHOLD
+        Long resetTimeoutMs = DEFAULT_RESET_TIMEOUT_MS
+        SSLContext sslContext = null
+        ThreadFactory threadFactory = null
+
+        switch (args.length) {
+            case 2:
+                connectTimeout = args[1] as Duration
+                break
+            case 3:
+                connectTimeout = args[1] as Duration
+                requestTimeout = args[2] as Duration
+                break
+            case 4:
+                connectTimeout   = args[1] as Duration
+                requestTimeout   = args[2] as Duration
+                failureThreshold = args[3] as Integer
+                 break
+            case 5:
+                connectTimeout   = args[1] as Duration
+                requestTimeout   = args[2] as Duration
+                failureThreshold = args[3] as Integer
+                resetTimeoutMs   = (args[4] as Number).longValue()
+                break
+            case 6:
+                connectTimeout   = args[1] as Duration
+                requestTimeout   = args[2] as Duration
+                failureThreshold = args[3] as Integer
+                resetTimeoutMs   = (args[4] as Number).longValue()
+                sslContext       = args[5] as SSLContext
+                break
+            case 7:
+                connectTimeout   = args[1] as Duration
+                requestTimeout   = args[2] as Duration
+                failureThreshold = args[3] as Integer
+                resetTimeoutMs   = (args[4] as Number).longValue()
+                sslContext       = args[5] as SSLContext
+                threadFactory    = args[6] as ThreadFactory
+                break
+        }
+
+        // Return arguments for the main 7-arg constructor
+        return [baseUrl, connectTimeout, requestTimeout,
+                failureThreshold, resetTimeoutMs, sslContext, threadFactory] as Object[]
+    }
+
+    GroovyHttpClient(String baseUrl,
+                     Duration connectTimeout,
+                     Duration requestTimeout,
+                     Integer failureThreshold,
+                     Long resetTimeoutMs,
+                     SSLContext sslContext,
+                     ThreadFactory threadFactory) {
+
+        if (!baseUrl || !baseUrl.startsWith("http")) {
+            throw new IllegalArgumentException("Invalid base URL: $baseUrl")
+        }
+
+        this.host = URI.create(baseUrl)
+        this.circuitBreaker = new CircuitBreaker(failureThreshold, resetTimeoutMs)
+
+        def tf = threadFactory ?: Thread.ofVirtual().name("http-client-", 0).factory()
+
+        if (sslContext) {
+            this.httpClient = HttpClient.newBuilder()
+                    .executor(Executors.newThreadPerTaskExecutor(tf))
+                    .connectTimeout(connectTimeout)
+                    .version(HttpClient.Version.HTTP_2)
+                    .sslContext(sslContext)
+                    .build()
+        } else {
+            this.httpClient = createInsecureHttpClient(tf, connectTimeout)
+        }
+    }
+
+    /**
+     * Groovy-friendly wrapper around Java's HttpRequest.Builder.
+     *
+     * Groovy's dynamic method resolution cannot always invoke Java methods directly
+     * (especially from classes in java.* modules like java.net.http). As a result,
+     * calling 'header(...)' inside a closure delegate bound to HttpRequest.Builder
+     * may fail or fallback to the closure's owner.
+     *
+     * This wrapper exposes selected builder methods explicitly, and uses
+     * `methodMissing` to forward any others, so that Groovy closures can call
+     * builder-style methods dynamically in DSL form:
+     *
+     *   client.get("/products") {
+     *       header "Accept", "application/json"
+     *       header "X-API-Key", "test-key"
+     *   }
+     *
+     * Without this wrapper, the closure delegate would resolve to the test spec
+     * or outer context, and calls like 'header()' would not reach the real builder.
+     */
+    private class GroovyRequestBuilder {
+        private final HttpRequest.Builder builder
+        private final Map<String, List<String>> headers = [:].withDefault { [] }
+
+        GroovyRequestBuilder(HttpRequest.Builder builder) {
+            this.builder = builder
+        }
+
+        // Add a header (multiple values allowed)
+        void header(String name, String value) {
+            builder.header(name, value)
+            headers[name] << value
+        }
+
+        boolean hasHeader(String name) {
+            headers.containsKey(name)
+        }
+
+        GroovyRequestBuilder timeout(Duration duration) {
+            builder.timeout(duration)
+            return this
+        }
+
+        def methodMissing(String name, args) {
+            builder."$name"(*args)
+        }
+
+        HttpRequest.Builder unwrap() {
+            return builder
+        }
+
+        Map<String, List<String>> getHeaders() {
+            headers.collectEntries { k, v -> [(k): v.toList()] }
+        }
+    }
+
+    /**
+     * Response wrapper that includes body, headers, and status code
+     */
+    static class HttpClientResponse {
+        final String body
+        final Map<String, List<String>> headers
+        final int statusCode
+
+        HttpClientResponse(HttpResponse<String> response) {
+            this.body = response.body()
+            this.headers = response.headers().map()
+            this.statusCode = response.statusCode()
+        }
+
+        /**
+         * Get the first value of a header (case-insensitive)
+         */
+        String getHeader(String name) {
+            def entry = headers.find { k, v -> k.equalsIgnoreCase(name) }
+            return entry?.value?.get(0)
+        }
+
+        /**
+         * Get all values of a header (case-insensitive)
+         */
+        List<String> getHeaders(String name) {
+            headers.findAll { k, v -> k.equalsIgnoreCase(name) }
+                    .values()                // get all List<String> values
+                    .flatten()               // combine them into a single List<String>
+        }
+
+        /**
+         * Check if a header exists (case-insensitive)
+         */
+        boolean hasHeader(String name) {
+            return headers.any { k, v -> k.equalsIgnoreCase(name) }
+        }
+
+        @Override
+        String toString() {
+            return body
+        }
+    }
+
+    /**
+     * Add a default header that will be included in all requests
+     */
+    GroovyHttpClient withHeader(String name, String value) {
+        defaultHeaders.computeIfAbsent(name) { [] } << value
+        return this
+    }
+
+    /**
+     * Replace default header (single value)
+     */
+    GroovyHttpClient setHeader(String name, String value) {
+        defaultHeaders[name] = [value]
+        return this
+    }
+
+    /**
+     * Add multiple default headers (Map<String, String>)
+     */
+    GroovyHttpClient withHeaders(Map<String, String> headers) {
+        headers.each { k, v ->
+            defaultHeaders.computeIfAbsent(k) { [] } << v
+        }
+        return this
+    }
+
+    /**
+     * Replace all default headers
+     */
+    GroovyHttpClient setHeaders(Map<String, String> headers) {
+        defaultHeaders.clear()
+        headers.each { k, v -> defaultHeaders[k] = [v] }
+        return this
+    }
+
+    /**
+     * Clear all default headers
+     */
+    GroovyHttpClient clearHeaders() {
+        defaultHeaders.clear()
+        return this
+    }
+
+    /**
+     * Get a copy of the default headers
+     */
+    Map<String, List<String>> getDefaultHeaders() {
+        defaultHeaders.collectEntries { k, v -> [(k): v.toList()] }
+    }
+
+    /**
+     * Apply default headers to a request builder
+     * Returns the builder for possible chaining
+     */
+    private HttpRequest.Builder applyDefaultHeaders(HttpRequest.Builder requestBuilder) {
+        defaultHeaders.each { name, values ->
+            // Only add if request doesn't already have this header
+            if (!requestBuilder.headers().map().containsKey(name)) {
+                values.each { v -> requestBuilder.header(name, v) }
+            }
+        }
+        return requestBuilder
+    }
+
 
     // Add this method to GroovyHttpClient class to make testing easier
     static HttpClient createInsecureHttpClient(ThreadFactory threadFactory, Duration connectTimeout) {
@@ -79,249 +348,92 @@ class GroovyHttpClient implements AutoCloseable  {
         }
     }
 
-    /**
-     * Creates a new HTTP client with the specified base URL
-     *
-     * @param baseUrl The base URL for all requests
-     * @param connectTimeout Optional connection timeout
-     * @param requestTimeout Optional request timeout
-     * @param failureThreshold Optional circuit breaker failure threshold
-     * @param resetTimeoutMs Optional circuit breaker reset timeout in milliseconds
-     * @param sslContext Optional SSLContext to use (e.g., for trusting all certificates in tests)
-     */
-
-    GroovyHttpClient(String host,
-                     Duration connectTimeout = DEFAULT_CONNECT_TIMEOUT,
-                     Duration requestTimeout = DEFAULT_REQUEST_TIMEOUT,
-                     int failureThreshold = DEFAULT_FAILURE_THRESHOLD,
-                     long resetTimeoutMs = DEFAULT_RESET_TIMEOUT_MS,
-                     SSLContext sslContext = null,
-                     HostnameVerifier hostnameVerifier = null
-    ) {
-
-        if (!host) {
-            throw new IllegalArgumentException("Base URL cannot be null or empty")
-        }
-
-        try {
-            this.host = new URI(host)
-        } catch (Exception e) {
-            throw new IllegalArgumentException("Invalid URL format: $host", e)
-        }
-
-        // Initialize circuit breaker first to prevent NPE
-        this.circuitBreaker = new CircuitBreaker(failureThreshold, resetTimeoutMs)
-
-        // Create thread factory for virtual threads
-        ThreadFactory virtualThreadFactory = Thread.ofVirtual()
-                .name("http-client-", threadCounter.toLong())
-                .factory()
-
-        // Create a trust manager that trusts all certificates
-        TrustManager[] trustAllCerts = new TrustManager[]{
-                new X509TrustManager() {
-                    public X509Certificate[] getAcceptedIssuers() {
-                        return new X509Certificate[0]
-                    }
-
-                    public void checkClientTrusted(X509Certificate[] certs, String authType) {
-                        // No validation
-                    }
-
-                    public void checkServerTrusted(X509Certificate[] certs, String authType) {
-                        // No validation
-                    }
-                }
-        }
-
-        // Create a custom SSL context that trusts all certificates
-        SSLContext customSSLContext
-        try {
-            customSSLContext = SSLContext.getInstance("TLS")
-            customSSLContext.init(null, trustAllCerts, new SecureRandom())
-        } catch (Exception e) {
-            throw new RuntimeException("Error initializing SSL context", e)
-        }
-
-        // Use the proper class for static method calls in Groovy
-        // This ensures we're calling the static method on the correct class
-        def connectionClass = Class.forName("javax.net.ssl.HttpsURLConnection")
-
-        // Create a hostname verifier that accepts all hostnames
-        HostnameVerifier trustAllHostnames = new HostnameVerifier() {
-            @Override
-            boolean verify(String hostname, SSLSession session) {
-                return true
-            }
-        }
-
-        // For legacy Java API compatibility, set the default hostname verifier
-        //todo only ok for tests
-        // Call the static method properly
-        connectionClass.getDeclaredMethod("setDefaultHostnameVerifier", HostnameVerifier.class)
-                .invoke(null, trustAllHostnames)
-
-
-        // Initialize the HttpClient.Builder with our custom SSL context
-        HttpClient.Builder clientBuilder = HttpClient.newBuilder()
-                .executor(Executors.newThreadPerTaskExecutor(virtualThreadFactory))
-                .connectTimeout(connectTimeout)
-                .version(HttpClient.Version.HTTP_2)
-                .sslContext(sslContext ?: customSSLContext)
-
-        // Create and configure SSLParameters to disable hostname verification
-        //By explicitly setting setApplicationProtocols(["h2", "http/1.1"]), you're telling the SSL handshake to negotiate HTTP/2 ("h2") first, falling back to HTTP/1.1 if needed
-        SSLParameters sslParameters = new SSLParameters()
-        sslParameters.setEndpointIdentificationAlgorithm(null)
-        sslParameters.setApplicationProtocols(["h2", "http/1.1"] as String[])
-        clientBuilder.sslParameters(sslParameters)
-
-        // Build the HttpClient
-        this.httpClient = clientBuilder.build()
-
-        // Register a shutdown hook to ensure resources are cleaned up
-        Runtime.getRuntime().addShutdownHook(
-                Thread.ofPlatform().unstarted({
-                    try {
-                        this.close()
-                    } catch (Exception ignored) {
-                        // Ignore exceptions during shutdown
-                    }
-                } as Runnable)
-        )
-    }
-
-    // static createWithOptions map
-    static GroovyHttpClient createWithOptions(String baseUrl, Map<String, Object> options) {
-        // Initialize an instance using reflection or by directly setting fields if possible.
-        GroovyHttpClient client = new GroovyHttpClient(baseUrl)
-
-        // Set properties based on the provided map. Here we assume some common keys.
-        // Use invokeMethod to set values dynamically without exposing them as public
-        ['connectionTimeout', 'requestTimeout', 'circuitBreakerFailureThreshold', 'circuitBreakerResetTimeout'].each { String propertyName ->
-            Long value = (Long) options.getOrDefault(propertyName, null)
-            if (value != null) {
-                client.invokeMethod("set${propertyName.capitalize()}", [value])
-            }
-        }
-
-        return client
-    }
-
-    // Static inner class for building instances using builder style
-    static class Builder {
-        private String baseUrl = 'http://localhost'
-        private Duration connectionTimeout = Duration.ofSeconds(10)
-        private Duration requestTimeout = Duration.ofMinutes(1)
-        private int circuitBreakerFailureThreshold = 5
-        private long circuitBreakerResetTimeout = 10000 // in milliseconds
-
-        Builder setBaseUrl(String baseUrl) {
-            this.baseUrl = baseUrl
-            return this
-        }
-
-        Builder setConnectionTimeout(Duration connectionTimeout) {
-            this.connectionTimeout = connectionTimeout
-            return this
-        }
-
-        Builder setRequestTimeout(Duration requestTimeout) {
-            this.requestTimeout = requestTimeout
-            return this
-        }
-
-        Builder setCircuitBreakerFailureThreshold(int circuitBreakerFailureThreshold) {
-            this.circuitBreakerFailureThreshold = circuitBreakerFailureThreshold
-            return this
-        }
-
-        Builder setCircuitBreakerResetTimeout(long circuitBreakerResetTimeout) {
-            this.circuitBreakerResetTimeout = circuitBreakerResetTimeout
-            return this
-        }
-
-        GroovyHttpClient build() {
-            // Instantiate the class with accumulated parameters
-            return new GroovyHttpClient(baseUrl,
-                    connectionTimeout,
-                    requestTimeout,
-                    circuitBreakerFailureThreshold,
-                    circuitBreakerResetTimeout)
-        }
-    }
-
-    /**
-     * take a well formed url and get the host from that and reuse
-     * @param url
-     */
-    GroovyHttpClient (URL url) {
-        if (!url) {
-            throw new MalformedURLException("null url passed ")
-        }
-
-        this.host = url.toURI()
-
-        // Create thread factory for virtual threads
-        ThreadFactory virtualThreadFactory = Thread.ofVirtual()
-                .name("http-client-", threadCounter.toLong())
-                .factory()
-
-        // Create the HttpClient with virtual threads
-        this.httpClient = HttpClient.newBuilder()
-                .executor(Executors.newThreadPerTaskExecutor(virtualThreadFactory))
-                .connectTimeout(DEFAULT_CONNECT_TIMEOUT)
-                .version(HttpClient.Version.HTTP_2)  // Explicitly enable HTTP/2
-                .build()
-
-        this.circuitBreaker = new CircuitBreaker(DEFAULT_FAILURE_THRESHOLD, DEFAULT_RESET_TIMEOUT_MS)
-
-        // Register a shutdown hook to ensure resources are cleaned up
-        Runtime.getRuntime().addShutdownHook(
-                Thread.ofPlatform().unstarted({
-                    try {
-                        this.close()
-                    } catch (Exception ignored) {
-                        // Ignore exceptions during shutdown
-                    }
-                } as Runnable)
-        )
-    }
-
     //-------------------------------------------------------------------------
     // Asynchronous HTTP Methods
     //-------------------------------------------------------------------------
+
+    //remove duplication of logic - add create a common helper that call the correct HTTP method
+    private CompletableFuture<HttpClientResponse> sendRequest(
+            String method,
+            String path,
+            String body = null,
+            @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure configClosure = null
+    ) {
+        // Build the base request
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(resolveUri(path))
+                .timeout(DEFAULT_REQUEST_TIMEOUT)
+
+        // Set HTTP method and body
+        switch (method.toUpperCase()) {
+            case "GET":
+                requestBuilder.GET()
+                break
+            case "POST":
+                requestBuilder.POST(HttpRequest.BodyPublishers.ofString(body ?: ""))
+                break
+            case "PUT":
+                requestBuilder.PUT(HttpRequest.BodyPublishers.ofString(body ?: ""))
+                break
+            case "PATCH":
+                requestBuilder.method("PATCH", HttpRequest.BodyPublishers.ofString(body ?: ""))
+                break
+            case "DELETE":
+                requestBuilder.DELETE()
+                break
+            default:
+                requestBuilder.method(method.toUpperCase(), HttpRequest.BodyPublishers.noBody())
+        }
+
+        // Wrap builder for Groovy closure DSL
+        def wrappedRequestBuilder = new GroovyRequestBuilder(requestBuilder)
+
+        // Apply default headers unconditionally to the wrapped builder
+        defaultHeaders.each { name, values ->
+            values.each { v ->
+                wrappedRequestBuilder.header(name, v)
+            }
+        }
+
+        // Apply request-specific closure
+        if (configClosure) {
+            if (configClosure.maximumNumberOfParameters == 1) {
+                configClosure.call(wrappedRequestBuilder)
+            } else {
+                configClosure.delegate = wrappedRequestBuilder
+                configClosure.resolveStrategy = Closure.DELEGATE_ONLY
+                configClosure.call()
+            }
+        }
+
+        // Build the final request
+        HttpRequest request = wrappedRequestBuilder.unwrap().build()
+
+        // Execute with circuit breaker
+        return executeWithCircuitBreaker {
+            httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                    .thenApply { response ->
+                        if (response.statusCode() >= 400) {
+                            circuitBreaker.recordFailure()
+                            throw new HttpResponseException(response.statusCode(), response.body())
+                        }
+                        return new HttpClientResponse(response)
+                    }
+        }
+    }
 
     /**
      * Performs an asynchronous GET request
      *
      * @param path The path to append to the base URL
      * @param configClosure Optional closure for configuring the request
-     * @return CompletableFuture with the response body as String
+     * @return CompletableFuture with the response (body and headers)
      */
-    CompletableFuture<String> get(String path, Closure configClosure = null) {
-        return executeWithCircuitBreaker { ->
-            HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-                    .uri(resolveUri(path))
-                    .GET()
-                    .timeout(DEFAULT_REQUEST_TIMEOUT)
-
-            if (configClosure) {
-                configClosure.delegate = requestBuilder
-                configClosure.resolveStrategy = Closure.DELEGATE_FIRST
-                configClosure()
-            }
-
-            HttpRequest request = requestBuilder.build()
-            return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                    .thenApply({ response ->
-                        if (response.statusCode() >= 400) {
-                            circuitBreaker.recordFailure()
-                            throw new HttpResponseException(response.statusCode(), response.body())
-                        }
-                        return response.body()
-                    })
-        }
+    CompletableFuture<HttpClientResponse> get(
+            String path,
+            @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure configClosure = null
+    ) {
+        sendRequest("GET", path, null, configClosure)
     }
 
     /**
@@ -330,31 +442,10 @@ class GroovyHttpClient implements AutoCloseable  {
      * @param path The path to append to the base URL
      * @param body The request body
      * @param configClosure Optional closure for configuring the request
-     * @return CompletableFuture with the response body as String
+     * @return CompletableFuture with the response (body and headers)
      */
-    CompletableFuture<String> post(String path, String body, Closure configClosure = null) {
-        return executeWithCircuitBreaker { ->
-            HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-                    .uri(resolveUri(path))
-                    .POST(HttpRequest.BodyPublishers.ofString(body))
-                    .timeout(DEFAULT_REQUEST_TIMEOUT)
-
-            if (configClosure) {
-                configClosure.delegate = requestBuilder
-                configClosure.resolveStrategy = Closure.DELEGATE_FIRST
-                configClosure()
-            }
-
-            HttpRequest request = requestBuilder.build()
-            return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                    .thenApply({ response ->
-                        if (response.statusCode() >= 400) {
-                            circuitBreaker.recordFailure()
-                            throw new HttpResponseException(response.statusCode(), response.body())
-                        }
-                        return response.body()
-                    })
-        }
+    CompletableFuture<HttpClientResponse> post(String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure configClosure = null ) {
+            sendRequest("POST", path, body, configClosure)
     }
 
     /**
@@ -363,63 +454,10 @@ class GroovyHttpClient implements AutoCloseable  {
      * @param path The path to append to the base URL
      * @param body The request body
      * @param configClosure Optional closure for configuring the request
-     * @return CompletableFuture with the response body as String
+     * @return CompletableFuture with the response (body and headers)
      */
-    CompletableFuture<String> put(String path, String body, Closure configClosure = null) {
-        return executeWithCircuitBreaker { ->
-            HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-                    .uri(resolveUri(path))
-                    .PUT(HttpRequest.BodyPublishers.ofString(body))
-                    .timeout(DEFAULT_REQUEST_TIMEOUT)
-
-            if (configClosure) {
-                configClosure.delegate = requestBuilder
-                configClosure.resolveStrategy = Closure.DELEGATE_FIRST
-                configClosure()
-            }
-
-            HttpRequest request = requestBuilder.build()
-            return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                    .thenApply({ response ->
-                        if (response.statusCode() >= 400) {
-                            circuitBreaker.recordFailure()
-                            throw new HttpResponseException(response.statusCode(), response.body())
-                        }
-                        return response.body()
-                    })
-        }
-    }
-
-    /**
-     * Performs an asynchronous DELETE request
-     *
-     * @param path The path to append to the base URL
-     * @param configClosure Optional closure for configuring the request
-     * @return CompletableFuture with the response body as String
-     */
-    CompletableFuture<String> delete(String path, Closure configClosure = null) {
-        return executeWithCircuitBreaker { ->
-            HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-                    .uri(resolveUri(path))
-                    .DELETE()
-                    .timeout(DEFAULT_REQUEST_TIMEOUT)
-
-            if (configClosure) {
-                configClosure.delegate = requestBuilder
-                configClosure.resolveStrategy = Closure.DELEGATE_FIRST
-                configClosure()
-            }
-
-            HttpRequest request = requestBuilder.build()
-            return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                    .thenApply({ response ->
-                        if (response.statusCode() >= 400) {
-                            circuitBreaker.recordFailure()
-                            throw new HttpResponseException(response.statusCode(), response.body())
-                        }
-                        return response.body()
-                    })
-        }
+    CompletableFuture<HttpClientResponse> put(String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure configClosure = null) {
+        sendRequest("PUT", path, body, configClosure)
     }
 
     /**
@@ -428,32 +466,23 @@ class GroovyHttpClient implements AutoCloseable  {
      * @param path The path to append to the base URL
      * @param body The request body
      * @param configClosure Optional closure for configuring the request
-     * @return CompletableFuture with the response body as String
+     * @return CompletableFuture with the response (body and headers)
      */
-    CompletableFuture<String> patch(String path, String body, Closure configClosure = null) {
-        return executeWithCircuitBreaker { ->
-            HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-                    .uri(resolveUri(path))
-                    .method("PATCH", HttpRequest.BodyPublishers.ofString(body))
-                    .timeout(DEFAULT_REQUEST_TIMEOUT)
-
-            if (configClosure) {
-                configClosure.delegate = requestBuilder
-                configClosure.resolveStrategy = Closure.DELEGATE_FIRST
-                configClosure()
-            }
-
-            HttpRequest request = requestBuilder.build()
-            return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                    .thenApply({ response ->
-                        if (response.statusCode() >= 400) {
-                            circuitBreaker.recordFailure()
-                            throw new HttpResponseException(response.statusCode(), response.body())
-                        }
-                        return response.body()
-                    })
-        }
+    CompletableFuture<HttpClientResponse> patch(String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure configClosure = null) {
+        sendRequest("PATCH", path, body, configClosure)
     }
+
+    /**
+     * Performs an asynchronous DELETE request
+     *
+     * @param path The path to append to the base URL
+     * @param configClosure Optional closure for configuring the request
+     * @return CompletableFuture with the response (body and headers)
+     */
+    CompletableFuture<HttpClientResponse> delete(String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure configClosure = null) {
+        sendRequest("DELETE", path, null, configClosure)
+    }
+
 
     /**
      * Performs an asynchronous HEAD request
@@ -462,29 +491,8 @@ class GroovyHttpClient implements AutoCloseable  {
      * @param configClosure Optional closure for configuring the request
      * @return CompletableFuture with HttpResponse
      */
-    CompletableFuture<HttpResponse<Void>> head(String path, Closure configClosure = null) {
-        return executeWithCircuitBreaker { ->
-            HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-                    .uri(resolveUri(path))
-                    .method("HEAD", HttpRequest.BodyPublishers.noBody())
-                    .timeout(DEFAULT_REQUEST_TIMEOUT)
-
-            if (configClosure) {
-                configClosure.delegate = requestBuilder
-                configClosure.resolveStrategy = Closure.DELEGATE_FIRST
-                configClosure()
-            }
-
-            HttpRequest request = requestBuilder.build()
-            return httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
-                    .thenApply({ response ->
-                        if (response.statusCode() >= 400) {
-                            circuitBreaker.recordFailure()
-                            throw new HttpResponseException(response.statusCode(), "HTTP error")
-                        }
-                        return response
-                    })
-        }
+    CompletableFuture<HttpClientResponse> head(String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure configClosure = null) {
+        sendRequest("HEAD", path, body, configClosure)
     }
 
     /**
@@ -501,10 +509,13 @@ class GroovyHttpClient implements AutoCloseable  {
                     .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
                     .timeout(DEFAULT_REQUEST_TIMEOUT)
 
+            // Apply default headers first
+            applyDefaultHeaders(requestBuilder)
+
+            // Safely apply any request-specific overrides via closure
             if (configClosure) {
-                configClosure.delegate = requestBuilder
-                configClosure.resolveStrategy = Closure.DELEGATE_FIRST
-                configClosure()
+                // Give the closure access to the builder explicitly
+                configClosure.call(requestBuilder)
             }
 
             HttpRequest request = requestBuilder.build()
@@ -529,9 +540,9 @@ class GroovyHttpClient implements AutoCloseable  {
      * @param path The path to append to the base URL
      * @param configClosure Optional closure for configuring the request
      * @param timeout Optional timeout duration
-     * @return Response body as String
+     * @return Response with body and headers
      */
-    String getSync(String path, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+    HttpClientResponse getSync(String path, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
         return get(path, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
     }
 
@@ -542,9 +553,9 @@ class GroovyHttpClient implements AutoCloseable  {
      * @param body The request body
      * @param configClosure Optional closure for configuring the request
      * @param timeout Optional timeout duration
-     * @return Response body as String
+     * @return Response with body and headers
      */
-    String postSync(String path, String body, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+    HttpClientResponse postSync(String path, String body, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
         return post(path, body, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
     }
 
@@ -555,9 +566,9 @@ class GroovyHttpClient implements AutoCloseable  {
      * @param body The request body
      * @param configClosure Optional closure for configuring the request
      * @param timeout Optional timeout duration
-     * @return Response body as String
+     * @return Response with body and headers
      */
-    String putSync(String path, String body, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+    HttpClientResponse putSync(String path, String body, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
         return put(path, body, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
     }
 
@@ -567,9 +578,9 @@ class GroovyHttpClient implements AutoCloseable  {
      * @param path The path to append to the base URL
      * @param configClosure Optional closure for configuring the request
      * @param timeout Optional timeout duration
-     * @return Response body as String
+     * @return Response with body and headers
      */
-    String deleteSync(String path, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+    HttpClientResponse deleteSync(String path, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
         return delete(path, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
     }
 
@@ -580,9 +591,9 @@ class GroovyHttpClient implements AutoCloseable  {
      * @param body The request body
      * @param configClosure Optional closure for configuring the request
      * @param timeout Optional timeout duration
-     * @return Response body as String
+     * @return Response with body and headers
      */
-    String patchSync(String path, String body, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+    HttpClientResponse patchSync(String path, String body, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
         return patch(path, body, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
     }
 
@@ -628,8 +639,9 @@ class GroovyHttpClient implements AutoCloseable  {
             }
         }
 
-        String pathToUse = path.startsWith('/') ? path.substring(1) : path
-        return URI.create("${host}${host.toString().endsWith('/') ? '' : '/'}${pathToUse}")
+        String hostStr = host.toString().endsWith('/') ? host.toString()[0..-2] : host.toString()
+        String pathStr = path.startsWith('/') ? path : "/$path"
+        return URI.create(hostStr + pathStr)
     }
 
     /**

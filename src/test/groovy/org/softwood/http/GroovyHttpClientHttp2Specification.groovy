@@ -95,6 +95,7 @@ class GroovyHttpClientHttp2Spec extends Specification {
             resp.writer.println("Success")
         }), "/version")
         testServer.startServer()
+        testServer.waitUntilListening()
 
         // Update client with actual port
         def baseUrl = "https://localhost:${testServer.port}"
@@ -103,7 +104,8 @@ class GroovyHttpClientHttp2Spec extends Specification {
         def response = client.getSync("${baseUrl}/version") { -> header("Accept", "application/json") }
 
         then:
-        response.trim() == "Success"
+        response.body.trim() == "Success"
+        response.statusCode == 200
     }
 
     @Unroll
@@ -113,6 +115,7 @@ class GroovyHttpClientHttp2Spec extends Specification {
             resp.writer.println("Success with $method")
         }), "/test")
         testServer.startServer()
+        testServer.waitUntilListening()
 
         // Create the full URL to use in the request
         def absoluteUrl = "https://localhost:${testServer.port}/test"
@@ -121,7 +124,8 @@ class GroovyHttpClientHttp2Spec extends Specification {
         def response = executeRequest(method, absoluteUrl)
 
         then:
-        response.trim() == "Success with $method"
+        response.body.trim() == "Success with $method"
+        response.statusCode == 200
 
         where:
         method   | _
@@ -142,6 +146,7 @@ class GroovyHttpClientHttp2Spec extends Specification {
             }), path)
         }
         testServer.startServer()
+        testServer.waitUntilListening()
 
         def baseUrl = "https://localhost:${testServer.port}"
 
@@ -151,11 +156,12 @@ class GroovyHttpClientHttp2Spec extends Specification {
 
         then:
         responses.size() == paths.size()
-        responses.every { it.startsWith("Response for /concurrent") }
+        responses.every { it.body.startsWith("Response for /concurrent") }
     }
 
     //helper method for should handle HTTP/2 #method requests correctly
-    private String executeRequest(String method, String url) {
+    //now response wrapped in HttpClientResponse
+    private GroovyHttpClient.HttpClientResponse executeRequest(String method, String url) {
         switch (method) {
             case "GET":
                 // Pass the full URL
