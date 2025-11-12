@@ -23,6 +23,45 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.function.Supplier
 
+/*
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+/**
+ * GroovyHttpClient.groovy
+ * ------------------------------------------------------------
+ * A high-performance Groovy-friendly HTTP client built on Java 21’s
+ * HttpClient and virtual threads. Provides a clean DSL for performing
+ * synchronous and asynchronous HTTP/1.1 and HTTP/2 requests with
+ * integrated cookie handling, circuit breaker, and security policies.
+ *
+ * <p>Features include:</p>
+ * <ul>
+ *   <li>Asynchronous and synchronous request methods</li>
+ *   <li>Cookie management and automatic persistence</li>
+ *   <li>Configurable timeouts, SSL handling, and request headers</li>
+ *   <li>Support for custom SecurityConfig profiles (production, staging, testing)</li>
+ *   <li>Integrated circuit breaker for fault tolerance</li>
+ *   <li>Fluent Groovy DSL closures for request configuration</li>
+ * </ul>
+ *
+ * <p>Intended for both production-grade and test environments.</p>
+ *
+ * @author  Will Woodman
+ * @version 1.0-RELEASE
+ * @since   2025-11
+ */
+
 /**
  * GroovyHttpClient — virtual-thread HTTP client with circuit breaker, cookies, and SecurityConfig integration.
  *

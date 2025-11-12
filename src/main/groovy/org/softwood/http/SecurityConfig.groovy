@@ -3,6 +3,46 @@ package org.softwood.http
 import java.net.CookiePolicy
 import java.time.Duration
 
+/*
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+/**
+ * SecurityConfig.groovy
+ * ------------------------------------------------------------
+ * Centralized configuration class for defining and enforcing
+ * security and environment-specific policies for the GroovyHttpClient.
+ *
+ * <p>Encapsulates connection security, timeouts, TLS options, and
+ * cookie handling behavior across multiple deployment profiles.</p>
+ *
+ * <p>Features include:</p>
+ * <ul>
+ *   <li>Predefined profiles for production, staging, and testing</li>
+ *   <li>Enforcement of TLS versions and hostname verification</li>
+ *   <li>Customizable timeouts and circuit breaker thresholds</li>
+ *   <li>Cookie policy and absolute URL restrictions</li>
+ *   <li>Support for fine-grained runtime overrides</li>
+ * </ul>
+ *
+ * <p>Used internally by {@link org.softwood.http.GroovyHttpClient}
+ * to standardize HTTP client configuration and ensure secure defaults.</p>
+ *
+ * @author  Will Woodman
+ * @version 1.0-RELEASE
+ * @since   2025-11
+ */
+
 /**
  * Centralized security configuration for GroovyHttpClient.
  * Defines safe defaults and environment-specific overrides

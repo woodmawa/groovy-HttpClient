@@ -6,6 +6,41 @@ import com.sun.net.httpserver.HttpServer
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
 
+/*
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+/**
+ * MockHttpServer.groovy
+ * ------------------------------------------------------------
+ * A lightweight, embeddable HTTP mock server designed for unit and
+ * integration testing of GroovyHttpClient and related HTTP components.
+ *
+ * <p>Provides a declarative API for defining mock endpoints with:</p>
+ * <ul>
+ *   <li>Expected request methods, paths, headers, and cookies</li>
+ *   <li>Configurable response status, headers, and bodies</li>
+ *   <li>Response delay simulation for timeout testing</li>
+ *   <li>Automatic request validation and diagnostic logging</li>
+ * </ul>
+ *
+ * <p>Used by the GroovyHttpClient test suite for validating correctness,
+ * concurrency handling, and cookie persistence.</p>
+ *
+ * @author  Will Woodman
+ * @version 1.0-RELEASE
+ * @since   2025-11
+ */
 class MockHttpServer {
 
     private HttpServer server
