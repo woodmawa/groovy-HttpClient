@@ -541,6 +541,8 @@ class GroovyHttpClient implements AutoCloseable  {
      * @param configClosure Optional closure for configuring the request
      * @param timeout Optional timeout duration
      * @return Response with body and headers
+     *
+     * calls the async version the blocks using the get (timeout) to get a result
      */
     HttpClientResponse getSync(String path, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
         return get(path, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
