@@ -16,9 +16,6 @@ java {
         languageVersion = JavaLanguageVersion.of(25)
     }
 }
-/*configurations.all {
-    resolutionStrategy.force 'org.wiremock:wiremock:3.13.1'
-}*/
 
 //global variables defined in gradle.properties file
 dependencies {
