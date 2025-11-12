@@ -1,7 +1,7 @@
 # GroovyHttpClient
 
 A modern, thread-safe HTTP client for Groovy that leverages **Java 21 virtual threads** for high-performance, non-blocking HTTP operations.  
-Built on top of Java’s `java.net.http.HttpClient` with enhanced resilience via a **Circuit Breaker pattern** and full local testing support through a **MockHttpServer**.
+Built on top of Java’s `java.net.http.HttpClient` with enhanced resilience via a **Circuit Breaker pattern**, and full local testing support through an improved **MockHttpServer** with full **cookie management**.
 
 ---
 
@@ -10,19 +10,22 @@ Built on top of Java’s `java.net.http.HttpClient` with enhanced resilience via
 ### GroovyHttpClient
 - **Virtual Threads** – powered by Java 21 Loom for lightweight concurrency  
 - **Thread-Safe** – safe to share between threads or actors  
-- **Circuit Breaker** – detects repeated failures, prevents cascading service errors  
-- **Fluent, Closure-Based API** – readable request customization  
+- **Circuit Breaker** – detects repeated failures, prevents cascading errors  
+- **Fluent Closure-Based API** – Groovy DSL for request customization  
 - **HTTP/2 Support** – automatic negotiation with fallback to HTTP/1.1  
-- **Sync and Async APIs** – `getSync()` for blocking, `get()` for async  
-- **Custom SSL/TLS** – for test or production contexts  
-- **Full HTTP Verb Support** – GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS  
+- **Sync & Async APIs** – `getSync()` or `get()` for non-blocking calls  
+- **Full Cookie Management** – automatic persistence and manual control  
+- **Custom SSL/TLS** – for testing or secure production contexts  
+- **Complete HTTP Verb Support** – GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS  
 
 ### MockHttpServer
-- **Lightweight Test Server** for local integration tests  
+- **Lightweight HTTP Server** for integration and unit tests  
 - **Per-Request Configuration** (method, path, headers, delay, status, body)  
-- **Multi-Value Headers** supported via `Map<String, List<String>>`  
-- **Response Delay Simulation** via `.withDelay(ms)`  
-- **Graceful Lifecycle** (`start()`, `stop()`, automatic port assignment)  
+- **Header & Cookie Validation** – test request integrity easily  
+- **Multi-Value Headers** via `Map<String,List<String>>`  
+- **Response Cookie Simulation** with `Set-Cookie` headers  
+- **Response Delay Simulation** for timeout testing  
+- **Graceful Lifecycle** (`init()`, `shutdown()`)  
 
 ---
 
@@ -32,126 +35,69 @@ Built on top of Java’s `java.net.http.HttpClient` with enhanced resilience via
 import org.softwood.http.GroovyHttpClient
 import org.softwood.test.MockHttpServer
 
-// Start mock server on auto-assigned port
-def server = new MockHttpServer(0)
-server.start()
-server.addRequestCheck("GET", "/hello", 200, '{"msg":"hi"}')
+def server = new MockHttpServer()
+server.init()
+server.addRequestCheck("GET", "/hello", 200)
+      .withResponseBody('{"msg":"hi"}')
 
 def client = new GroovyHttpClient("http://localhost:${server.port}")
 
-try {
-    // Synchronous GET
-    println client.getSync("/hello")
+def response = client.getSync("/hello")
+println response.body   // → {"msg":"hi"}
 
-    // Asynchronous GET
-    client.get("/hello").thenAccept { resp ->
-        println "Async Response: $resp"
-    }.join()
-} finally {
-    client.close()
-    server.stop()
-}
+server.shutdown()
 ```
 
 ---
 
-## 📦 Installation
+## 🍪 Cookie Handling
 
-Add to your project under:
-
-```
-src/main/groovy/org/softwood/http/GroovyHttpClient.groovy
-src/test/groovy/org/softwood/test/MockHttpServer.groovy
-```
-
-Or publish locally using Gradle:
-
-```bash
-./gradlew publishToMavenLocal
-```
-
-Then include it in your `build.gradle`:
+### Automatic Cookie Management
+Cookies are automatically stored and reused between requests.
 
 ```groovy
-repositories {
-    mavenLocal()
-    mavenCentral()
-}
+def client = new GroovyHttpClient("http://localhost:${server.port}")
+client.getSync("/login")         // receives Set-Cookie
+client.getSync("/profile")       // cookie sent automatically
+```
 
-dependencies {
-    implementation "org.softwood:groovy-HttpClient:1.0-SNAPSHOT"
-}
+### Manual Cookie Control
+You can add, remove, and clear cookies directly:
+
+```groovy
+client.addCookie("session", "abc123")
+client.removeCookie("session")
+client.clearCookies()
+```
+
+### Inspecting Cookies
+```groovy
+println client.getCookie("session")?.value
+println client.getCookies()  // list of HttpCookie objects
 ```
 
 ---
 
-## ⚙️ Basic Usage
+## 🧪 MockHttpServer Cookie Testing
 
 ```groovy
-def client = new GroovyHttpClient("https://api.example.com")
+def server = new MockHttpServer()
+server.init()
 
-// Custom timeouts
-def client2 = new GroovyHttpClient(
-    "https://api.example.com",
-    Duration.ofSeconds(5),
-    Duration.ofSeconds(15)
-)
-```
+server.addRequestCheck("GET", "/secure", 200)
+      .withExpectedCookies([auth: "token123"])
+      .withResponseCookies([session: "new456"])
+      .withResponseBody('{"ok":true}')
 
----
+def client = new GroovyHttpClient("http://localhost:${server.port}")
+client.addCookie("auth", "token123")
 
-## 🧱 Using the Builder
+def response = client.getSync("/secure")
 
-```groovy
-def client = GroovyHttpClient.Builder()
-    .setBaseUrl("https://api.example.com")
-    .setConnectionTimeout(Duration.ofSeconds(10))
-    .setRequestTimeout(Duration.ofMinutes(1))
-    .setCircuitBreakerFailureThreshold(5)
-    .setCircuitBreakerResetTimeout(10000)
-    .build()
-```
+assert response.statusCode == 200
+assert client.getCookie("session").value == "new456"
 
----
-
-## 🧩 Using Options Map
-
-```groovy
-def options = [
-    connectionTimeout: Duration.ofSeconds(10),
-    requestTimeout: Duration.ofMinutes(2),
-    circuitBreakerFailureThreshold: 7,
-    circuitBreakerResetTimeout: 15000
-]
-def client = GroovyHttpClient.createWithOptions("https://api.example.com", options)
-```
-
----
-
-## 🌐 Making Requests
-
-### Synchronous
-
-```groovy
-def result = client.getSync("/posts/1")
-println result
-```
-
-### Asynchronous
-
-```groovy
-client.get("/users").thenAccept { resp ->
-    println "Response: $resp"
-}
-```
-
-### POST Example
-
-```groovy
-def json = '{"title":"My Post","body":"Hello","userId":1}'
-def response = client.postSync("/posts", json) {
-    header "Content-Type", "application/json"
-}
+server.shutdown()
 ```
 
 ---
@@ -163,8 +109,8 @@ def client = new GroovyHttpClient(
     "https://api.example.com",
     Duration.ofSeconds(5),
     Duration.ofSeconds(15),
-    3, // fail threshold
-    10000 // reset after 10s
+    3,        // failure threshold
+    10000     // reset timeout
 )
 
 try {
@@ -176,59 +122,74 @@ try {
 
 ---
 
-## 🧪 Testing with MockHttpServer
+## 🧩 Example with Headers and Cookies
 
 ```groovy
-def server = new MockHttpServer(0)
-server.start()
-
-server.addRequestCheck(
-    "GET",
-    "/multi",
-    200,
-    '{"ok":true}',
-    [ "X-Request": ["val1", "val2"] ],
-    [ "X-Response": ["res1", "res2"] ],
-    500 // delay
-)
-
 def client = new GroovyHttpClient("http://localhost:${server.port}")
-println client.getSync("/multi")
-server.stop()
+client.withHeader("X-API-Key", "123")
+      .addCookie("auth", "abc")
+
+def response = client.postSync("/submit", '{"data":42}') {
+    header "Content-Type", "application/json"
+}
 ```
 
 ---
 
-## 🧵 Thread Safety
+## 🧱 Testing with MockHttpServer
 
-- Built on **virtual threads**
-- Each request isolated  
-- Circuit breaker uses **atomic state**  
-- Clients are **safe to share**  
+```groovy
+def server = new MockHttpServer()
+server.init()
+
+server.addRequestCheck("GET", "/multi", 200)
+      .withResponseHeaders([
+          "X-Test": ["val1", "val2"],
+          "Content-Type": ["application/json"]
+      ])
+      .withResponseCookies([session: "xyz"])
+      .withResponseBody('{"ok":true}')
+
+def client = new GroovyHttpClient("http://localhost:${server.port}")
+def response = client.getSync("/multi")
+
+assert response.getHeader("X-Test") == "val1"
+assert client.getCookie("session").value == "xyz"
+
+server.shutdown()
+```
 
 ---
 
 ## 🧰 Best Practices
 
 1. Reuse client instances  
-2. Always call `close()`  
+2. Always call `close()` after use  
 3. Catch `CircuitOpenException` and `HttpResponseException`  
-4. Use async for concurrent loads  
-5. Log or monitor circuit breaker transitions  
-6. For tests, isolate with `MockHttpServer`
+4. Use async (`get()`, `post()`) for concurrency  
+5. Use `MockHttpServer` for local tests  
+6. Use `clearCookies()` between tests for isolation  
 
 ---
 
 ## 🔧 Troubleshooting
 
-- **Timeouts**: Ensure `requestTimeout` exceeds any `MockHttpServer` delay.  
-- **Circuit Open**: Reset after `circuitBreakerResetTimeout`.  
-- **Port Conflicts**: Use `0` for auto-port.  
-- **Headers**: Use `Map<String, List<String>>`.  
-- **Thread Leaks**: Always `close()` clients.
+| Issue | Cause | Solution |
+|--------|--------|----------|
+| Cookie mismatch | Wrong or missing cookie | Use `.withExpectedCookies()` in tests |
+| Timeout | Too short `requestTimeout` | Increase request timeout |
+| Circuit open | Too many failures | Wait or increase `resetTimeoutMs` |
+| Port conflicts | Reusing fixed port | Use auto-port (default) |
+| Header mismatch | Case sensitivity | All headers matched case-insensitively |
+
+---
+
+## 🧵 Thread Safety
+- Built entirely on **virtual threads**  
+- Thread-safe `CookieManager` and circuit breaker  
+- Each request fully isolated  
 
 ---
 
 ## 🪪 License
-
 See your project’s `LICENSE` file.
