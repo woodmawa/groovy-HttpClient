@@ -38,5 +38,23 @@ bin/
 ### VS Code ###
 .vscode/
 
-### Mac OS ###
+### Logs and runtime files
+*.log
+*.tmp
+*.swp
+
+### OS / editor artifacts
 .DS_Store
+Thumbs.db
+
+### Test output
+test-output/
+reports/
+*.ser
+
+### Compiled Groovy / Java classes
+*.class
+target/
+
+### Dependencies (if local libs are built)
+lib/
