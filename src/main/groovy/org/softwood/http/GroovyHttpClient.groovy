@@ -1,5 +1,7 @@
 package org.softwood.http
 
+import groovy.util.logging.Slf4j
+
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLParameters
 import javax.net.ssl.TrustManager
@@ -23,263 +25,227 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.function.Supplier
 
-/*
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
- */
-
 /**
- * GroovyHttpClient.groovy
- * ------------------------------------------------------------
- * A high-performance Groovy-friendly HTTP client built on Java 21’s
- * HttpClient and virtual threads. Provides a clean DSL for performing
- * synchronous and asynchronous HTTP/1.1 and HTTP/2 requests with
- * integrated cookie handling, circuit breaker, and security policies.
- *
- * <p>Features include:</p>
- * <ul>
- *   <li>Asynchronous and synchronous request methods</li>
- *   <li>Cookie management and automatic persistence</li>
- *   <li>Configurable timeouts, SSL handling, and request headers</li>
- *   <li>Support for custom SecurityConfig profiles (production, staging, testing)</li>
- *   <li>Integrated circuit breaker for fault tolerance</li>
- *   <li>Fluent Groovy DSL closures for request configuration</li>
- * </ul>
- *
- * <p>Intended for both production-grade and test environments.</p>
- *
- * @author  Will Woodman
- * @version 1.0-RELEASE
- * @since   2025-11
+ * GroovyHttpClient — virtual-thread HTTP client with:
+ *  - Circuit breaker
+ *  - Cookie management
+ *  - SecurityConfig integration
+ *  - Multipart upload & file download
+ *  - Groovy DSL for request configuration
  */
-
-/**
- * GroovyHttpClient — virtual-thread HTTP client with circuit breaker, cookies, and SecurityConfig integration.
- *
- * This version preserves all previous capabilities while adding a new constructor that accepts SecurityConfig
- * to enable secure-by-default behavior (hostname verification, cookie policy, absolute URL/host allow-list, etc.).
- */
+@Slf4j
 class GroovyHttpClient implements AutoCloseable {
-    private final URI host
-    private final HttpClient httpClient
-    private final CircuitBreaker circuitBreaker
-    private final CookieManager cookieManager
 
-    // --- Security/behavior flags (populated by SecurityConfig constructor; benign defaults otherwise) ---
-    private boolean allowAbsoluteUrls = true
-    private Set<String> allowedHosts = Collections.synchronizedSet(new LinkedHashSet<>())
-    private long maxResponseBytes = Long.MAX_VALUE
-    private boolean enableLogging = false
+    // -------------------------------------------------------------------------
+    // Static defaults
+    // -------------------------------------------------------------------------
 
-    // Default headers are Map<String, List<String>>
-    private Map<String, List<String>> defaultHeaders = [:].withDefault { [] }.asSynchronized()
-
-    // Thread counter for naming virtual threads
-    private static final AtomicInteger threadCounter = new AtomicInteger(0)
-
-    // Default timeout values
     public static final Duration DEFAULT_CONNECT_TIMEOUT = Duration.ofSeconds(10)
     public static final Duration DEFAULT_REQUEST_TIMEOUT = Duration.ofSeconds(30)
+    public static final Duration DEFAULT_SYNC_TIMEOUT    = Duration.ofSeconds(30)
 
-    // Default synchronous method timeout
-    public static final Duration DEFAULT_SYNC_TIMEOUT = Duration.ofSeconds(30)
+    public static final int  DEFAULT_FAILURE_THRESHOLD = 5
+    public static final long DEFAULT_RESET_TIMEOUT_MS  = 30_000L
 
-    // Circuit breaker defaults
-    public static final int DEFAULT_FAILURE_THRESHOLD = 5
-    public static final long DEFAULT_RESET_TIMEOUT_MS = 30000
+    private static final AtomicInteger THREAD_COUNTER = new AtomicInteger(0)
 
-    // ----------------------------------------------------------------------------------------------
-    // Constructors (backward compatible)
-    // ----------------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Fields
+    // -------------------------------------------------------------------------
 
-    GroovyHttpClient(String baseUrl) {
-        this(baseUrl, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT,
-                DEFAULT_FAILURE_THRESHOLD, DEFAULT_RESET_TIMEOUT_MS, null, null)
-    }
+    final SecurityConfig config
+    private final URI host
+    private final HttpClient httpClient
+    private final CookieManager cookieManager
+    private final CircuitBreaker circuitBreaker
+
+    private final boolean allowAbsoluteUrls
+    private final Set<String> allowedHosts
+    private final long maxResponseBytes
+
+    // Default headers: Map<String, List<String>>
+    private final Map<String, List<String>> defaultHeaders =
+            [:].withDefault { [] }.asSynchronized()
 
     /**
-     * Generic constructor for variable args that then calls the full constructor.
+     * Simple cookie handler facade used by tests:
+     *
+     *   client.cookieHandler.addCookie("session","abc123")
+     *
+     * These cookies will be sent on all requests as a single "Cookie" header,
+     * unless an explicit Cookie header is already set.
      */
-    GroovyHttpClient(Object... args) {
-        this(*resolveConstructorArgs(args))
-    }
+    final SimpleCookieHandler cookieHandler = new SimpleCookieHandler()
 
-    // Helper method to compute argument list for delegation
-    private static Object[] resolveConstructorArgs(Object... args) {
-        if (!args) {
-            throw new IllegalArgumentException("Base URL is required")
-        }
-
-        String baseUrl = args[0] as String
-        if (!baseUrl || !baseUrl.startsWith("http")) {
-            throw new IllegalArgumentException("Invalid base URL: $baseUrl")
-        }
-
-        // Defaults
-        Duration connectTimeout = DEFAULT_CONNECT_TIMEOUT
-        Duration requestTimeout = DEFAULT_REQUEST_TIMEOUT
-        Integer failureThreshold = DEFAULT_FAILURE_THRESHOLD
-        Long resetTimeoutMs = DEFAULT_RESET_TIMEOUT_MS
-        SSLContext sslContext = null
-        ThreadFactory threadFactory = null
-
-        switch (args.length) {
-            case 2:
-                connectTimeout = args[1] as Duration
-                break
-            case 3:
-                connectTimeout = args[1] as Duration
-                requestTimeout = args[2] as Duration
-                break
-            case 4:
-                connectTimeout   = args[1] as Duration
-                requestTimeout   = args[2] as Duration
-                failureThreshold = args[3] as Integer
-                break
-            case 5:
-                connectTimeout   = args[1] as Duration
-                requestTimeout   = args[2] as Duration
-                failureThreshold = args[3] as Integer
-                resetTimeoutMs   = (args[4] as Number).longValue()
-                break
-            case 6:
-                connectTimeout   = args[1] as Duration
-                requestTimeout   = args[2] as Duration
-                failureThreshold = args[3] as Integer
-                resetTimeoutMs   = (args[4] as Number).longValue()
-                sslContext       = args[5] as SSLContext
-                break
-            case 7:
-                connectTimeout   = args[1] as Duration
-                requestTimeout   = args[2] as Duration
-                failureThreshold = args[3] as Integer
-                resetTimeoutMs   = (args[4] as Number).longValue()
-                sslContext       = args[5] as SSLContext
-                threadFactory    = args[6] as ThreadFactory
-                break
-        }
-
-        // Return arguments for the main 7-arg constructor
-        return [baseUrl, connectTimeout, requestTimeout,
-                failureThreshold, resetTimeoutMs, sslContext, threadFactory] as Object[]
-    }
-
-    GroovyHttpClient(String baseUrl,
-                     Duration connectTimeout,
-                     Duration requestTimeout,
-                     Integer failureThreshold,
-                     Long resetTimeoutMs,
-                     SSLContext sslContext,
-                     ThreadFactory threadFactory) {
-
-        if (!baseUrl || !baseUrl.startsWith("http")) {
-            throw new IllegalArgumentException("Invalid base URL: $baseUrl")
-        }
-
-        this.host = URI.create(baseUrl)
-        this.circuitBreaker = new CircuitBreaker(failureThreshold, resetTimeoutMs)
-
-        // Initialize cookie manager (legacy default remains ACCEPT_ALL for backward compatibility)
-        this.cookieManager = new CookieManager()
-        this.cookieManager.setCookiePolicy(CookiePolicy.ACCEPT_ALL)
-
-        def tf = threadFactory ?: Thread.ofVirtual().name("http-client-", threadCounter.getAndIncrement()).factory()
-
-        if (sslContext) {
-            this.httpClient = HttpClient.newBuilder()
-                    .executor(Executors.newThreadPerTaskExecutor(tf))
-                    .connectTimeout(connectTimeout)
-                    .version(HttpClient.Version.HTTP_2)
-                    .sslContext(sslContext)
-                    .cookieHandler(cookieManager)
-                    .build()
-        } else {
-            // Legacy behavior: create an insecure client if sslContext is missing
-            this.httpClient = createInsecureHttpClient(tf, connectTimeout, cookieManager)
-        }
-
-        // Legacy: allowAbsoluteUrls true, allowedHosts includes base
-        this.allowedHosts.add(this.host.host)
-    }
+    // -------------------------------------------------------------------------
+    // Constructors
+    // -------------------------------------------------------------------------
 
     /**
-     * NEW: Secure-by-default constructor using SecurityConfig.
+     * Main constructor — configure via SecurityConfig.
      */
     GroovyHttpClient(SecurityConfig config) {
         if (!config?.baseUrl || !config.baseUrl.startsWith("http")) {
             throw new IllegalArgumentException("Invalid base URL in SecurityConfig: ${config?.baseUrl}")
         }
 
+        this.config = config
         this.host = URI.create(config.baseUrl)
-        this.circuitBreaker = new CircuitBreaker(config.failureThreshold ?: DEFAULT_FAILURE_THRESHOLD,
-                config.resetTimeoutMs ?: DEFAULT_RESET_TIMEOUT_MS)
 
-        // Cookie manager with policy from config
-        this.cookieManager = new CookieManager()
-        this.cookieManager.setCookiePolicy(config.cookiePolicy ?: CookiePolicy.ACCEPT_ORIGINAL_SERVER)
+        this.cookieManager = new CookieManager(null, config.cookiePolicy ?: CookiePolicy.ACCEPT_ORIGINAL_SERVER)
+        this.circuitBreaker = new CircuitBreaker(
+                config.failureThreshold ?: DEFAULT_FAILURE_THRESHOLD,
+                config.resetTimeoutMs   ?: DEFAULT_RESET_TIMEOUT_MS
+        )
 
-        // Save security behavior flags
-        this.allowAbsoluteUrls = (config.allowAbsoluteUrls != null) ? config.allowAbsoluteUrls : false
-        this.allowedHosts.clear(); this.allowedHosts.addAll(config.allowedHosts ?: [this.host.host])
-        this.maxResponseBytes = (config.maxResponseBytes ?: 10_000_000L)
-        this.enableLogging = (config.enableLogging ?: false)
+        this.allowAbsoluteUrls = config.allowAbsoluteUrls
+        this.allowedHosts = Collections.synchronizedSet(new LinkedHashSet<>(config.allowedHosts ?: [host.host]))
+        this.maxResponseBytes = config.maxResponseBytes ?: 10_000_000L
 
-        // Build secure HttpClient (do NOT force insecure client; use default unless explicitly permitted)
-        def tf = Thread.ofVirtual().name("http-client-", threadCounter.getAndIncrement()).factory()
+        ThreadFactory tf = Thread.ofVirtual()
+                .name("http-client-", THREAD_COUNTER.getAndIncrement())
+                .factory()
+
         def builder = HttpClient.newBuilder()
                 .executor(Executors.newThreadPerTaskExecutor(tf))
                 .connectTimeout(config.connectTimeout ?: DEFAULT_CONNECT_TIMEOUT)
                 .version(HttpClient.Version.HTTP_2)
+                .followRedirects(config.allowRedirects ? HttpClient.Redirect.NORMAL : HttpClient.Redirect.NEVER)
                 .cookieHandler(cookieManager)
                 .proxy(ProxySelector.getDefault())
 
         if (config.insecureAllowed) {
-            // Honor insecureAllowed and visibly warn
-            logWarn("[GroovyHttpClient] Insecure TLS permitted by SecurityConfig (trust-all). TEST/STAGING USE ONLY.")
-            // Keep behavior contained by creating a permissive client
-            def insecureClient = createInsecureClientForBuilder(builder)
-            this.httpClient = insecureClient
+            this.httpClient = createInsecureClient(builder, config)
+            log.warn("[GroovyHttpClient] Insecure TLS permitted by SecurityConfig (trustAll/testing profile). TEST/DEV USE ONLY.")
         } else {
-            // Secure path: rely on system/default SSLContext and enable hostname verification
-            def params = new SSLParameters()
-            params.setEndpointIdentificationAlgorithm("HTTPS")
-            builder.sslParameters(params)
-            this.httpClient = builder.build()
+            this.httpClient = createSecureClient(builder, config)
         }
 
-        // Ensure base host is in the allow-list
         this.allowedHosts.add(this.host.host)
     }
 
-    // ----------------------------------------------------------------------------------------------
-    // Groovy-friendly wrapper around Java's HttpRequest.Builder.
-    // ----------------------------------------------------------------------------------------------
+    /**
+     * Convenience constructor for tests:
+     *
+     *   new GroovyHttpClient("http://localhost:8080")
+     *
+     * This uses SecurityConfig.testing(baseUrl).
+     */
+    GroovyHttpClient(String baseUrl) {
+        this(SecurityConfig.testing(baseUrl))
+    }
+
+    // -------------------------------------------------------------------------
+    // HttpClient building
+    // -------------------------------------------------------------------------
+
+    private static HttpClient createSecureClient(HttpClient.Builder baseBuilder, SecurityConfig config) {
+        SSLParameters sslParams = new SSLParameters()
+
+        if (config.allowedTlsProtocols) {
+            sslParams.setProtocols(config.allowedTlsProtocols as String[])
+        }
+
+        if (config.allowedCipherSuites) {
+            sslParams.setCipherSuites(config.allowedCipherSuites as String[])
+        }
+
+        sslParams.setEndpointIdentificationAlgorithm(
+                config.enforceHostnameVerification ? "HTTPS" : null
+        )
+
+        baseBuilder.sslParameters(sslParams)
+        baseBuilder.sslContext(SSLContext.getDefault())
+        return baseBuilder.build()
+    }
+
+    private static HttpClient createInsecureClient(HttpClient.Builder baseBuilder, SecurityConfig config) {
+        TrustManager[] trustAll = [
+                new X509TrustManager() {
+                    X509Certificate[] getAcceptedIssuers() { null }
+                    void checkClientTrusted(X509Certificate[] certs, String authType) {}
+                    void checkServerTrusted(X509Certificate[] certs, String authType) {}
+                }
+        ] as TrustManager[]
+
+        SSLContext sslContext = SSLContext.getInstance("TLS")
+        sslContext.init(null, trustAll, new SecureRandom())
+
+        SSLParameters sslParams = new SSLParameters()
+        sslParams.setEndpointIdentificationAlgorithm(
+                config.enforceHostnameVerification ? "HTTPS" : null
+        )
+        sslParams.setApplicationProtocols(["h2", "http/1.1"] as String[])
+
+        if (config.allowedTlsProtocols) {
+            sslParams.setProtocols(config.allowedTlsProtocols as String[])
+        }
+
+        if (config.allowedCipherSuites) {
+            sslParams.setCipherSuites(config.allowedCipherSuites as String[])
+        }
+
+        baseBuilder.sslContext(sslContext)
+                .sslParameters(sslParams)
+
+        return baseBuilder.build()
+    }
+
+    // -------------------------------------------------------------------------
+    // Simple cookie handler facade
+    // -------------------------------------------------------------------------
+
+    static class SimpleCookieHandler {
+        private final Map<String, String> cookies = [:]
+
+        void addCookie(String name, String value) {
+            cookies[name] = value
+        }
+
+        void removeCookie(String name) {
+            cookies.remove(name)
+        }
+
+        void clear() {
+            cookies.clear()
+        }
+
+        Map<String, String> getCookies() {
+            Collections.unmodifiableMap(cookies)
+        }
+
+        /**
+         * Render as Cookie header: "a=1; b=2"
+         */
+        String asHeaderValue() {
+            cookies.collect { k, v -> "${k}=${v}" }.join("; ")
+        }
+
+        boolean isEmpty() {
+            cookies.isEmpty()
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Groovy-friendly Request Builder wrapper
+    // -------------------------------------------------------------------------
 
     private class GroovyRequestBuilder {
         private final HttpRequest.Builder builder
         private final Map<String, List<String>> headers = [:].withDefault { [] }
+        private final List<MultipartPart> multipartParts = []
 
         GroovyRequestBuilder(HttpRequest.Builder builder) {
             this.builder = builder
         }
 
-        // Add a header (multiple values allowed)
         void header(String name, String value) {
             builder.header(name, value)
             headers[name] << value
         }
 
         boolean hasHeader(String name) {
-            headers.containsKey(name)
+            headers.keySet().any { it.equalsIgnoreCase(name) }
         }
 
         GroovyRequestBuilder timeout(Duration duration) {
@@ -287,15 +253,25 @@ class GroovyHttpClient implements AutoCloseable {
             return this
         }
 
-        /** Add a cookie to this specific request */
         void cookie(String name, String value) {
             header("Cookie", "${name}=${value}")
         }
 
-        /** Add multiple cookies to this request */
         void cookies(Map<String, String> cookies) {
             def cookieString = cookies.collect { k, v -> "${k}=${v}" }.join("; ")
             header("Cookie", cookieString)
+        }
+
+        void multipart(List<MultipartPart> parts) {
+            if (parts) multipartParts.addAll(parts)
+        }
+
+        void part(MultipartPart part) {
+            if (part) multipartParts << part
+        }
+
+        List<MultipartPart> getMultipartParts() {
+            Collections.unmodifiableList(multipartParts)
         }
 
         def methodMissing(String name, args) {
@@ -303,7 +279,7 @@ class GroovyHttpClient implements AutoCloseable {
         }
 
         HttpRequest.Builder unwrap() {
-            return builder
+            builder
         }
 
         Map<String, List<String>> getHeaders() {
@@ -311,9 +287,9 @@ class GroovyHttpClient implements AutoCloseable {
         }
     }
 
-    // ----------------------------------------------------------------------------------------------
-    // Response wrapper that includes body, headers, and status code
-    // ----------------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Response wrapper
+    // -------------------------------------------------------------------------
 
     static class HttpClientResponse {
         final String body
@@ -328,26 +304,25 @@ class GroovyHttpClient implements AutoCloseable {
 
         String getHeader(String name) {
             def entry = headers.find { k, v -> k.equalsIgnoreCase(name) }
-            return entry?.value?.get(0)
+            entry?.value?.get(0)
         }
 
         List<String> getHeaders(String name) {
             headers.findAll { k, v -> k.equalsIgnoreCase(name) }
                     .values()
-                    .flatten()  as List<String>
+                    .flatten() as List<String>
         }
 
         boolean hasHeader(String name) {
-            return headers.any { k, v -> k.equalsIgnoreCase(name) }
+            headers.any { k, v -> k.equalsIgnoreCase(name) }
         }
 
-        @Override
         String toString() { body }
     }
 
-    // ----------------------------------------------------------------------------------------------
-    // Cookie Management API
-    // ----------------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Cookie management API (backed by CookieManager)
+    // -------------------------------------------------------------------------
 
     List<HttpCookie> getCookies() {
         cookieManager.cookieStore.get(host).collect()
@@ -362,128 +337,79 @@ class GroovyHttpClient implements AutoCloseable {
         cookie.path = path
         cookie.domain = host.host
         cookieManager.cookieStore.add(host, cookie)
-        return this
+        this
     }
 
     GroovyHttpClient addCookie(HttpCookie cookie) {
         cookieManager.cookieStore.add(host, cookie)
-        return this
+        this
     }
 
     GroovyHttpClient removeCookie(String name) {
         def cookies = cookieManager.cookieStore.get(host)
-        cookies.findAll { it.name == name }.each { cookie ->
-            cookieManager.cookieStore.remove(host, cookie)
+        cookies.findAll { it.name == name }.each { c ->
+            cookieManager.cookieStore.remove(host, c)
         }
-        return this
+        this
     }
 
     GroovyHttpClient clearCookies() {
         cookieManager.cookieStore.removeAll()
-        return this
+        this
     }
 
     GroovyHttpClient setCookiePolicy(CookiePolicy policy) {
-        cookieManager.setCookiePolicy(policy)
-        return this
+        cookieManager.cookiePolicy = policy
+        this
     }
 
-    CookiePolicy getCookiePolicy() { cookieManager.cookiePolicy }
+    CookiePolicy getCookiePolicy() {
+        cookieManager.cookiePolicy
+    }
 
-    CookieStore getCookieStore() { cookieManager.cookieStore }
+    CookieStore getCookieStore() {
+        cookieManager.cookieStore
+    }
 
-    // ----------------------------------------------------------------------------------------------
-    // Default Header Management API
-    // ----------------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Default header API
+    // -------------------------------------------------------------------------
 
     GroovyHttpClient withHeader(String name, String value) {
         defaultHeaders.computeIfAbsent(name) { [] } << value
-        return this
+        this
     }
 
     GroovyHttpClient setHeader(String name, String value) {
         defaultHeaders[name] = [value]
-        return this
+        this
     }
 
     GroovyHttpClient withHeaders(Map<String, String> headers) {
-        headers.each { k, v -> defaultHeaders.computeIfAbsent(k) { [] } << v }
-        return this
+        headers.each { k, v ->
+            defaultHeaders.computeIfAbsent(k) { [] } << v
+        }
+        this
     }
 
     GroovyHttpClient setHeaders(Map<String, String> headers) {
         defaultHeaders.clear()
         headers.each { k, v -> defaultHeaders[k] = [v] }
-        return this
+        this
     }
 
-    GroovyHttpClient clearHeaders() { defaultHeaders.clear(); this }
+    GroovyHttpClient clearHeaders() {
+        defaultHeaders.clear()
+        this
+    }
 
     Map<String, List<String>> getDefaultHeaders() {
         defaultHeaders.collectEntries { k, v -> [(k): v.toList()] }
     }
 
-    // ----------------------------------------------------------------------------------------------
-    // HTTP Client Creation (legacy test helper)
-    // ----------------------------------------------------------------------------------------------
-
-    static HttpClient createInsecureHttpClient(ThreadFactory threadFactory, Duration connectTimeout, CookieManager cookieManager = null) {
-        // Create a trust manager that trusts all certificates
-        TrustManager[] trustAllCerts = new TrustManager[] {
-                new X509TrustManager() {
-                    X509Certificate[] getAcceptedIssuers() { return null }
-                    void checkClientTrusted(X509Certificate[] certs, String authType) {}
-                    void checkServerTrusted(X509Certificate[] certs, String authType) {}
-                }
-        }
-
-        try {
-            SSLContext sslContext = SSLContext.getInstance("TLS")
-            sslContext.init(null, trustAllCerts, new SecureRandom())
-
-            SSLParameters sslParameters = new SSLParameters()
-            sslParameters.setEndpointIdentificationAlgorithm(null) // disable hostname verification
-            sslParameters.setApplicationProtocols(["h2", "http/1.1"] as String[])
-
-            def builder = HttpClient.newBuilder()
-                    .executor(Executors.newThreadPerTaskExecutor(threadFactory))
-                    .connectTimeout(connectTimeout)
-                    .version(HttpClient.Version.HTTP_2)
-                    .sslContext(sslContext)
-                    .sslParameters(sslParameters)
-
-            if (cookieManager) { builder.cookieHandler(cookieManager) }
-            return builder.build()
-        } catch (Exception e) {
-            throw new RuntimeException("Could not create insecure HTTP client", e)
-        }
-    }
-
-    /** Helper to create an insecure client using an existing builder skeleton. */
-    private static HttpClient createInsecureClientForBuilder(HttpClient.Builder baseBuilder) {
-        TrustManager[] trustAllCerts = new TrustManager[] {
-                new X509TrustManager() {
-                    X509Certificate[] getAcceptedIssuers() { return null }
-                    void checkClientTrusted(X509Certificate[] certs, String authType) {}
-                    void checkServerTrusted(X509Certificate[] certs, String authType) {}
-                }
-        }
-        try {
-            SSLContext sslContext = SSLContext.getInstance("TLS")
-            sslContext.init(null, trustAllCerts, new SecureRandom())
-            SSLParameters sslParameters = new SSLParameters()
-            sslParameters.setEndpointIdentificationAlgorithm(null)
-            sslParameters.setApplicationProtocols(["h2", "http/1.1"] as String[])
-            baseBuilder.sslContext(sslContext).sslParameters(sslParameters)
-            return baseBuilder.build()
-        } catch (Exception e) {
-            throw new RuntimeException("Could not create insecure HTTP client", e)
-        }
-    }
-
-    // ----------------------------------------------------------------------------------------------
-    // Core Request Handler
-    // ----------------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Core request sending logic (string body)
+    // -------------------------------------------------------------------------
 
     private CompletableFuture<HttpClientResponse> sendRequest(
             String method,
@@ -491,74 +417,280 @@ class GroovyHttpClient implements AutoCloseable {
             String body = null,
             @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure configClosure = null
     ) {
-        // Build the base request
-        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-                .uri(resolveUri(path))
-                .timeout(DEFAULT_REQUEST_TIMEOUT)
+        def uri = resolveUri(path)
+        log.debug("Preparing {} request to {}", method, uri)
 
-        // Set HTTP method and body
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(uri)
+                .timeout(config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT)
+
         switch (method.toUpperCase()) {
-            case "GET":
-                requestBuilder.GET(); break
-            case "POST":
-                requestBuilder.POST(HttpRequest.BodyPublishers.ofString(body ?: "")); break
-            case "PUT":
-                requestBuilder.PUT(HttpRequest.BodyPublishers.ofString(body ?: "")); break
-            case "PATCH":
-                requestBuilder.method("PATCH", HttpRequest.BodyPublishers.ofString(body ?: "")); break
-            case "DELETE":
-                requestBuilder.DELETE(); break
-            case "HEAD":
-                requestBuilder.method("HEAD", HttpRequest.BodyPublishers.noBody()); break
-            case "OPTIONS":
-                requestBuilder.method("OPTIONS", HttpRequest.BodyPublishers.noBody()); break
+            case "GET":     requestBuilder.GET(); break
+            case "POST":    requestBuilder.POST(HttpRequest.BodyPublishers.ofString(body ?: "")); break
+            case "PUT":     requestBuilder.PUT(HttpRequest.BodyPublishers.ofString(body ?: "")); break
+            case "PATCH":   requestBuilder.method("PATCH", HttpRequest.BodyPublishers.ofString(body ?: "")); break
+            case "DELETE":  requestBuilder.DELETE(); break
+            case "HEAD":    requestBuilder.method("HEAD", HttpRequest.BodyPublishers.noBody()); break
+            case "OPTIONS": requestBuilder.method("OPTIONS", HttpRequest.BodyPublishers.noBody()); break
             default:
                 requestBuilder.method(method.toUpperCase(), HttpRequest.BodyPublishers.noBody())
         }
 
-        // Wrap builder for Groovy closure DSL
-        def wrappedRequestBuilder = new GroovyRequestBuilder(requestBuilder)
+        def wrapped = new GroovyRequestBuilder(requestBuilder)
 
-        // Apply default headers
-        defaultHeaders.each { name, values -> values.each { v -> wrappedRequestBuilder.header(name, v) } }
+        // default headers
+        defaultHeaders.each { name, values ->
+            values.each { v -> wrapped.header(name, v) }
+        }
 
-        // Apply request-specific closure
+        // request-specific DSL
         if (configClosure) {
             if (configClosure.maximumNumberOfParameters == 1) {
-                configClosure.call(wrappedRequestBuilder)
+                configClosure.call(wrapped)
             } else {
-                configClosure.delegate = wrappedRequestBuilder
+                configClosure.delegate = wrapped
                 configClosure.resolveStrategy = Closure.DELEGATE_ONLY
                 configClosure.call()
             }
         }
 
-        // Build the final request
-        HttpRequest request = wrappedRequestBuilder.unwrap().build()
+        // apply cookieHandler cookies if no explicit Cookie header was set
+        if (!wrapped.hasHeader("Cookie") && !cookieHandler.isEmpty()) {
+            wrapped.header("Cookie", cookieHandler.asHeaderValue())
+        }
 
-        // Execute with circuit breaker
+        HttpRequest request = wrapped.unwrap().build()
+
         return executeWithCircuitBreaker {
             httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                     .thenApply { response ->
+                        log.debug("Received HTTP {} from {} ({} chars)",
+                                response.statusCode(), uri, response.body()?.length() ?: 0)
+
                         if (response.statusCode() >= 400) {
                             circuitBreaker.recordFailure()
                             throw new HttpResponseException(response.statusCode(), response.body())
                         }
-                        if (maxResponseBytes != Long.MAX_VALUE && response.body() != null) {
-                            // Note: this checks characters, not raw bytes; good enough as a guardrail
-                            if (response.body().length() > maxResponseBytes) {
-                                circuitBreaker.recordFailure()
-                                throw new HttpResponseException(413, "Body too large")
-                            }
+
+                        if (maxResponseBytes != Long.MAX_VALUE &&
+                                response.body() != null &&
+                                response.body().length() > maxResponseBytes) {
+                            circuitBreaker.recordFailure()
+                            throw new HttpResponseException(413, "Body too large")
                         }
-                        return new HttpClientResponse(response)
+
+                        new HttpClientResponse(response)
                     }
         }
     }
 
-    // ----------------------------------------------------------------------------------------------
-    // Asynchronous HTTP Methods
-    // ----------------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Multipart encoding helpers
+    // -------------------------------------------------------------------------
+
+    private static HttpRequest.BodyPublisher buildMultipartBody(List<MultipartPart> parts, String boundary) {
+        def byteArrays = []
+        parts.each { MultipartPart part ->
+            def header = """--${boundary}\r
+Content-Disposition: form-data; name="${part.name}"; filename="${part.filename}"\r
+Content-Type: ${part.contentType}\r
+\r
+""".getBytes("UTF-8")
+            byteArrays << header
+            byteArrays << part.data
+            byteArrays << "\r\n".getBytes("UTF-8")
+        }
+        byteArrays << "--${boundary}--\r\n".getBytes("UTF-8")
+        HttpRequest.BodyPublishers.ofByteArrays(byteArrays)
+    }
+
+    /**
+     * DSL builder for multipart parts + headers.
+     *
+     * Used like:
+     *
+     *   client.postMultipartSync("/upload") { b ->
+     *       b.part {
+     *           name "file1"
+     *           filename "readme.txt"
+     *           content "Hello"
+     *       }
+     *       b.header("X-Test", "dsl")
+     *   }
+     */
+    static class MultipartDSLBuilder {
+        List<MultipartPart> parts = []
+        Map<String, List<String>> headers = [:].withDefault { [] }
+
+        void part(@DelegatesTo(MultipartPart.Builder) Closure c) {
+            def pb = new MultipartPart.Builder()
+            c.delegate = pb
+            c.resolveStrategy = Closure.DELEGATE_ONLY
+            c()
+            parts << pb.build()
+        }
+
+        void header(String name, String value) {
+            headers[name] << value
+        }
+    }
+
+    // async multipart using DSL (A)
+    CompletableFuture<HttpClientResponse> postMultipart(
+            String path,
+            @DelegatesTo(strategy = Closure.DELEGATE_ONLY, value = MultipartDSLBuilder) Closure dsl
+    ) {
+        def mb = new MultipartDSLBuilder()
+
+        if (dsl.maximumNumberOfParameters == 1) {
+            dsl.call(mb)          // matches { b -> ... } in tests
+        } else {
+            dsl.delegate = mb
+            dsl.resolveStrategy = Closure.DELEGATE_ONLY
+            dsl.call()
+        }
+
+        return postMultipart(path, mb.parts) { rb ->
+            mb.headers.each { k, vs -> vs.each { v -> rb.header(k, v) } }
+        }
+    }
+
+    // sync multipart using DSL (A)
+    HttpClientResponse postMultipartSync(
+            String path,
+            @DelegatesTo(strategy = Closure.DELEGATE_ONLY, value = MultipartDSLBuilder) Closure dsl,
+            Duration timeout = DEFAULT_SYNC_TIMEOUT
+    ) {
+        postMultipart(path, dsl).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+    }
+
+    // async multipart with explicit List<MultipartPart> (B + C)
+    CompletableFuture<HttpClientResponse> postMultipart(
+            String path,
+            List<MultipartPart> parts,
+            @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure configClosure = null
+    ) {
+        if (!parts || parts.isEmpty()) {
+            throw new IllegalArgumentException("Multipart parts are required for postMultipart")
+        }
+
+        def uri = resolveUri(path)
+        def boundary = "----GroovyBoundary${System.currentTimeMillis()}"
+        log.info("Sending multipart POST to {} with boundary {}", uri, boundary)
+
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(uri)
+                .timeout(config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT)
+
+        def wrapped = new GroovyRequestBuilder(requestBuilder)
+
+        defaultHeaders.each { name, values ->
+            values.each { v -> wrapped.header(name, v) }
+        }
+
+        if (configClosure) {
+            if (configClosure.maximumNumberOfParameters == 1) {
+                configClosure.call(wrapped)
+            } else {
+                configClosure.delegate = wrapped
+                configClosure.resolveStrategy = Closure.DELEGATE_ONLY
+                configClosure.call()
+            }
+        }
+
+        def bodyPublisher = buildMultipartBody(parts, boundary)
+        wrapped.header("Content-Type", "multipart/form-data; boundary=${boundary}")
+
+        // apply cookieHandler if needed
+        if (!wrapped.hasHeader("Cookie") && !cookieHandler.isEmpty()) {
+            wrapped.header("Cookie", cookieHandler.asHeaderValue())
+        }
+
+        HttpRequest request = wrapped.unwrap().POST(bodyPublisher).build()
+
+        return executeWithCircuitBreaker {
+            httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                    .thenApply { response ->
+                        log.debug("Multipart POST received HTTP {} from {}", response.statusCode(), uri)
+                        if (response.statusCode() >= 400) {
+                            circuitBreaker.recordFailure()
+                            throw new HttpResponseException(response.statusCode(), response.body())
+                        }
+                        if (maxResponseBytes != Long.MAX_VALUE &&
+                                response.body() != null &&
+                                response.body().length() > maxResponseBytes) {
+                            circuitBreaker.recordFailure()
+                            throw new HttpResponseException(413, "Body too large")
+                        }
+                        new HttpClientResponse(response)
+                    }
+        }
+    }
+
+    // sync multipart with explicit parts (B)
+    HttpClientResponse postMultipartSync(
+            String path,
+            List<MultipartPart> parts,
+            Closure configClosure = null,
+            Duration timeout = DEFAULT_SYNC_TIMEOUT
+    ) {
+        postMultipart(path, parts, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+    }
+
+    // -------------------------------------------------------------------------
+    // File download support (downloadBytesSync used in tests)
+    // -------------------------------------------------------------------------
+
+    CompletableFuture<byte[]> downloadBytes(String path) {
+        def uri = resolveUri(path)
+        log.info("Downloading file from {}", uri)
+
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(uri)
+                .timeout(config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT)
+                .GET()
+
+        def wrapped = new GroovyRequestBuilder(requestBuilder)
+
+        defaultHeaders.each { name, values ->
+            values.each { v -> wrapped.header(name, v) }
+        }
+
+        // cookies via cookieHandler
+        if (!wrapped.hasHeader("Cookie") && !cookieHandler.isEmpty()) {
+            wrapped.header("Cookie", cookieHandler.asHeaderValue())
+        }
+
+        HttpRequest request = wrapped.unwrap().build()
+
+        return executeWithCircuitBreaker {
+            httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
+                    .thenApply { response ->
+                        if (response.statusCode() >= 400) {
+                            circuitBreaker.recordFailure()
+                            String bodyText = response.body() ?
+                                    new String(response.body(), "UTF-8") : ""
+                            throw new HttpResponseException(response.statusCode(), bodyText)
+                        }
+                        if (maxResponseBytes != Long.MAX_VALUE &&
+                                response.body() != null &&
+                                response.body().length > maxResponseBytes) {
+                            circuitBreaker.recordFailure()
+                            throw new HttpResponseException(413, "Body too large")
+                        }
+                        log.debug("Downloaded {} bytes from {}", response.body().length, uri)
+                        response.body()
+                    }
+        }
+    }
+
+    byte[] downloadBytesSync(String path, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        downloadBytes(path).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+    }
+
+    // -------------------------------------------------------------------------
+    // Async HTTP verbs (string body)
+    // -------------------------------------------------------------------------
 
     CompletableFuture<HttpClientResponse> get(String path,
                                               @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure configClosure = null) {
@@ -595,70 +727,68 @@ class GroovyHttpClient implements AutoCloseable {
         sendRequest("OPTIONS", path, null, configClosure)
     }
 
-    // ----------------------------------------------------------------------------------------------
-    // Synchronous HTTP Methods
-    // ----------------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Sync HTTP verbs
+    // -------------------------------------------------------------------------
 
     HttpClientResponse getSync(String path, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        return get(path, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        get(path, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
     }
 
     HttpClientResponse postSync(String path, String body, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        return post(path, body, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        post(path, body, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
     }
 
     HttpClientResponse putSync(String path, String body, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        return put(path, body, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        put(path, body, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
     }
 
     HttpClientResponse deleteSync(String path, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        return delete(path, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        delete(path, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
     }
 
     HttpClientResponse patchSync(String path, String body, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        return patch(path, body, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        patch(path, body, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
     }
 
     HttpClientResponse headSync(String path, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        return head(path, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        head(path, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
     }
 
     HttpClientResponse optionsSync(String path, Closure configClosure = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        return options(path, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        options(path, configClosure).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
     }
 
-    // ----------------------------------------------------------------------------------------------
-    // Helper Methods
-    // ----------------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // URI resolution with allowedHosts guard
+    // -------------------------------------------------------------------------
 
-    /** Resolves a path against the base URL with optional SSRF protections. */
     private URI resolveUri(String path) {
-        if (!path) { return host }
+        if (!path) return host
 
-        // Absolute URL handling (SSRF guard if disabled)
-        if (path.toLowerCase().startsWith('http://') || path.toLowerCase().startsWith('https://')) {
+        if (path.toLowerCase().startsWith("http://") || path.toLowerCase().startsWith("https://")) {
             if (!allowAbsoluteUrls) {
                 throw new IllegalArgumentException("Absolute URLs disabled by configuration")
             }
-            try {
-                def uri = new URI(path)
-                if (!allowedHosts.isEmpty() && !allowedHosts.contains(uri.host)) {
-                    throw new IllegalArgumentException("Target host not allowed: ${uri.host}")
-                }
-                return uri
-            } catch (Exception e) {
-                throw new IllegalArgumentException("Invalid absolute URL provided as path: $path", e)
+            def uri = new URI(path)
+            if (!allowedHosts.isEmpty() && !allowedHosts.contains(uri.host)) {
+                throw new IllegalArgumentException("Target host not allowed: ${uri.host}")
             }
+            return uri
         }
 
-        String hostStr = host.toString().endsWith('/') ? host.toString()[0..-2] : host.toString()
-        String pathStr = path.startsWith('/') ? path : "/$path"
-        return URI.create(hostStr + pathStr)
+        String base = host.toString().endsWith('/') ? host.toString()[0..-2] : host.toString()
+        String p = path.startsWith('/') ? path : "/$path"
+        URI.create(base + p)
     }
 
-    /** Executes an HTTP operation with circuit breaker protection */
+    // -------------------------------------------------------------------------
+    // Circuit breaker wrapper
+    // -------------------------------------------------------------------------
+
     private <T> CompletableFuture<T> executeWithCircuitBreaker(Supplier<CompletableFuture<T>> supplier) {
         if (circuitBreaker.isOpen()) {
+            log.warn("Circuit breaker is OPEN — rejecting request")
             CompletableFuture<T> future = new CompletableFuture<>()
             future.completeExceptionally(new CircuitOpenException("Circuit is open"))
             return future
@@ -669,12 +799,12 @@ class GroovyHttpClient implements AutoCloseable {
             return future.handle((result, throwable) -> {
                 if (throwable != null) {
                     Throwable cause = throwable
-                    while (cause instanceof CompletionException && cause.getCause() != null) {
-                        cause = cause.getCause()
+                    while (cause instanceof CompletionException && cause.cause != null) {
+                        cause = cause.cause
                     }
 
-                    // Record failure for any exception
                     circuitBreaker.recordFailure()
+                    log.warn("Request failed, recorded circuit-breaker failure: {}", cause.toString())
 
                     if (cause instanceof RuntimeException) {
                         throw (RuntimeException) cause
@@ -682,28 +812,33 @@ class GroovyHttpClient implements AutoCloseable {
                         throw new CompletionException(cause)
                     }
                 }
-                return result
+                result
             })
         } catch (Exception e) {
             circuitBreaker.recordFailure()
+            log.warn("Synchronous failure during HTTP execution, recorded circuit-breaker failure: {}", e.toString())
             CompletableFuture<T> future = new CompletableFuture<>()
             future.completeExceptionally(e)
-            return future
+            future
         }
     }
 
-    // ----------------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Lifecycle
-    // ----------------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     @Override
-    void close() { /* HttpClient has nothing to close; hook reserved for future */ }
+    void close() {
+        // HttpClient doesn't need explicit close
+    }
 
-    String toString(path='/') { resolveUri(path).toString() }
+    String toString(path = '/') {
+        resolveUri(path).toString()
+    }
 
-    // ----------------------------------------------------------------------------------------------
-    // Inner Classes
-    // ----------------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Inner classes: CircuitBreaker & exceptions
+    // -------------------------------------------------------------------------
 
     private static class CircuitBreaker {
         private final int failureThreshold
@@ -724,7 +859,7 @@ class GroovyHttpClient implements AutoCloseable {
                 }
                 return true
             }
-            return failureCount.get() >= failureThreshold
+            failureCount.get() >= failureThreshold
         }
 
         void recordFailure() {
@@ -734,7 +869,10 @@ class GroovyHttpClient implements AutoCloseable {
             }
         }
 
-        void reset() { failureCount.set(0); openStateTime = 0 }
+        void reset() {
+            failureCount.set(0)
+            openStateTime = 0
+        }
     }
 
     static class CircuitOpenException extends RuntimeException {
@@ -743,17 +881,10 @@ class GroovyHttpClient implements AutoCloseable {
 
     static class HttpResponseException extends RuntimeException {
         final int statusCode
+
         HttpResponseException(int statusCode, String responseBody) {
             super("HTTP error: $statusCode, body: $responseBody")
             this.statusCode = statusCode
         }
     }
-
-    // ----------------------------------------------------------------------------------------------
-    // Logging helpers (minimal; plug into your logger if needed)
-    // ----------------------------------------------------------------------------------------------
-
-    private void logWarn(String msg) { if (enableLogging) println "WARN  $msg" }
-    @SuppressWarnings('unused')
-    private void logInfo(String msg) { if (enableLogging) println "INFO  $msg" }
 }

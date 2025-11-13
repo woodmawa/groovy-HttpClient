@@ -1,5 +1,7 @@
 package org.softwood.http
 
+import groovy.util.logging.Slf4j
+
 import java.net.CookiePolicy
 import java.time.Duration
 
@@ -59,10 +61,24 @@ import java.time.Duration
  *       .maxResponseBytes(cfg.maxResponseBytes)
  *       .insecureAllowed(cfg.insecureAllowed)
  *       .build()
+ *
+ * Provides safe defaults for production, staging, testing, and local development.
+ * This class is immutable; helper factory methods enable easy profile selection.
+ *
+ * Profiles:
+ *   - production() : Strict, safe, TLS-only, no insecure connections.
+ *   - staging()    : Similar to prod but with logging enabled.
+ *   - testing()    : Allows insecure connections, accepts all cookies.
+ *   - trustAll()   : For local dev & unit testing; disables all TLS verification.
+ *
+ * All fields are final and supplied via the internal map-based constructor.
  */
+@Slf4j
 class SecurityConfig {
 
-    /** --- Core connection parameters --- **/
+    /** -------------------------------
+     * Core connection & behavioral settings
+     * ------------------------------- */
     final String baseUrl
     final Duration connectTimeout
     final Duration requestTimeout
@@ -75,36 +91,53 @@ class SecurityConfig {
     final boolean enableMetrics
     final boolean allowRedirects
 
-    /** --- Optional retry & circuit breaker --- **/
+    /** -------------------------------
+     * Retry & circuit breaker behavior
+     * ------------------------------- */
     final int failureThreshold
     final long resetTimeoutMs
 
-    /** --- Optional TLS configuration fields --- **/
+    /** -------------------------------
+     * TLS settings
+     * ------------------------------- */
     final boolean enforceHostnameVerification
     final List<String> allowedTlsProtocols
     final List<String> allowedCipherSuites
 
+    /**
+     * Internal constructor. This class is immutable; use predefined
+     * profiles or withOverrides() to generate variants.
+     */
     private SecurityConfig(Map args) {
-        this.baseUrl = args.baseUrl
-        this.connectTimeout = args.connectTimeout ?: Duration.ofSeconds(10)
-        this.requestTimeout = args.requestTimeout ?: Duration.ofSeconds(30)
-        this.insecureAllowed = args.insecureAllowed ?: false
-        this.allowAbsoluteUrls = args.allowAbsoluteUrls ?: false
-        this.maxResponseBytes = args.maxResponseBytes ?: 10_000_000L
-        this.cookiePolicy = args.cookiePolicy ?: CookiePolicy.ACCEPT_ORIGINAL_SERVER
-        this.allowedHosts = args.allowedHosts ?: [URI.create(baseUrl).host] as Set
-        this.enableLogging = args.enableLogging ?: false
-        this.enableMetrics = args.enableMetrics ?: true
-        this.allowRedirects = args.allowRedirects ?: true
-        this.failureThreshold = args.failureThreshold ?: 5
-        this.resetTimeoutMs = args.resetTimeoutMs ?: 30_000L
+        this.baseUrl                    = args.baseUrl
+        this.connectTimeout             = args.connectTimeout ?: Duration.ofSeconds(10)
+        this.requestTimeout             = args.requestTimeout ?: Duration.ofSeconds(30)
+        this.insecureAllowed            = args.insecureAllowed ?: false
+        this.allowAbsoluteUrls          = args.allowAbsoluteUrls ?: false
+        this.maxResponseBytes           = args.maxResponseBytes ?: 10_000_000L
+        this.cookiePolicy               = args.cookiePolicy ?: CookiePolicy.ACCEPT_ORIGINAL_SERVER
+        this.allowedHosts               = args.allowedHosts ?: [URI.create(baseUrl).host] as Set
+        this.enableLogging              = args.enableLogging ?: false
+        this.enableMetrics              = args.enableMetrics ?: true
+        this.allowRedirects             = args.allowRedirects ?: true
+
+        this.failureThreshold           = args.failureThreshold ?: 5
+        this.resetTimeoutMs             = args.resetTimeoutMs ?: 30_000L
+
         this.enforceHostnameVerification = args.enforceHostnameVerification ?: true
-        this.allowedTlsProtocols = args.allowedTlsProtocols ?: ["TLSv1.3"]
-        this.allowedCipherSuites = args.allowedCipherSuites ?: []
+        this.allowedTlsProtocols         = args.allowedTlsProtocols ?: ["TLSv1.3"]
+        this.allowedCipherSuites         = args.allowedCipherSuites ?: []
     }
 
-    /** --- Predefined safe profiles --- **/
+    /* ============================================================
+     *  Predefined configuration profiles
+     * ============================================================
+     */
 
+    /**
+     * Strict, production-grade security.
+     * No insecure connections, proper TLS, strict hostname checks.
+     */
     static SecurityConfig production(String baseUrl = "https://example.com") {
         new SecurityConfig([
                 baseUrl                    : baseUrl,
@@ -121,6 +154,10 @@ class SecurityConfig {
         ])
     }
 
+    /**
+     * Staging environment:
+     * Same as production but with logging enabled.
+     */
     static SecurityConfig staging(String baseUrl = "https://staging.example.com") {
         new SecurityConfig([
                 baseUrl                    : baseUrl,
@@ -134,6 +171,9 @@ class SecurityConfig {
         ])
     }
 
+    /**
+     * Testing profile. Allows insecure connections and absolute URLs.
+     */
     static SecurityConfig testing(String baseUrl = "http://localhost:8080") {
         new SecurityConfig([
                 baseUrl          : baseUrl,
@@ -145,11 +185,40 @@ class SecurityConfig {
         ])
     }
 
-    /** --- Builder-style clone for quick tweaks --- **/
+    /**
+     * Local development or unit test environment.
+     * Completely disables all TLS verification.
+     *
+     * WARNING: For testing only. Do not use in production environments.
+     */
+    static SecurityConfig trustAll(String baseUrl = "http://localhost:8080") {
+        new SecurityConfig([
+                baseUrl                    : baseUrl,
+                insecureAllowed             : true,   // Allow self-signed or invalid certs
+                allowAbsoluteUrls           : true,
+                cookiePolicy                : CookiePolicy.ACCEPT_ALL,
+                enforceHostnameVerification : false,
+                allowedTlsProtocols         : ["TLSv1.3", "TLSv1.2"],
+                allowedCipherSuites         : [],
+
+                connectTimeout              : Duration.ofSeconds(3),
+                requestTimeout              : Duration.ofSeconds(30),
+                failureThreshold            : 1,
+                resetTimeoutMs              : 1000,
+
+                enableLogging               : true,
+                enableMetrics               : false
+        ])
+    }
+
+    /**
+     * Modify an existing config with overrides.
+     */
     SecurityConfig withOverrides(Map overrides) {
         new SecurityConfig(this.properties + overrides)
     }
 
+    @Override
     String toString() {
         """SecurityConfig(
   baseUrl=${baseUrl},
