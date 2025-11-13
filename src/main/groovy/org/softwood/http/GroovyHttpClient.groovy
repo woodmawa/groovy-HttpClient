@@ -25,6 +25,132 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.function.Supplier
 
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * GroovyHttpClient — A modern, lightweight HTTP client with Groovy DSL support.
+ *
+ * <p>
+ * Built on top of Java 25’s {@link java.net.http.HttpClient} and virtual threads,
+ * this client provides a fluent Groovy API for synchronous and asynchronous HTTP calls,
+ * multipart uploads, resilient networking, and a secure configuration model.
+ * </p>
+ *
+ * <h2>Key Features</h2>
+ * <ul>
+ *   <li>✔ Fluent DSL for headers, cookies, and request configuration</li>
+ *   <li>✔ Automatic cookie management backed by {@link java.net.CookieManager}</li>
+ *   <li>✔ Support for multipart/form-data via DSL or static {@code MultipartPart} API</li>
+ *   <li>✔ Integrated circuit breaker for resilience (open/half-open/closed)</li>
+ *   <li>✔ Virtual threads for ultra-lightweight concurrency</li>
+ *   <li>✔ Works with secure defaults using {@link org.softwood.http.SecurityConfig}</li>
+ *   <li>✔ SSRF-safe URL resolution with host allow-list</li>
+ *   <li>✔ Async and sync API (using {@code CompletableFuture})</li>
+ * </ul>
+ *
+ * <h2>Construction Options</h2>
+ * <p>
+ * The client supports multiple constructors:
+ * </p>
+ *
+ * <ul>
+ *   <li><strong>String-only</strong>: {@code new GroovyHttpClient("https://api")}</li>
+ *   <li><strong>Extended constructors</strong> with timeouts, retry thresholds, SSLContext, and thread factories</li>
+ *   <li><strong>SecurityConfig-based</strong>: {@code new GroovyHttpClient(SecurityConfig.production(...))}</li>
+ * </ul>
+ *
+ * <h2>Multipart Support</h2>
+ * <p>
+ * Two styles are supported:
+ * </p>
+ * <ul>
+ *   <li><strong>DSL-based</strong>:
+ *     <pre>{@code
+ *     client.postMultipartSync("/upload") {
+ *         part {
+ *             name "file1"
+ *             filename "data.txt"
+ *             content "Hello!"
+ *         }
+ *         header "X-Test", "dsl"
+ *     }
+ *     }</pre>
+ *   </li>
+ *   <li><strong>Static API</strong> via {@link org.softwood.http.MultipartPart}:
+ *     <pre>{@code
+ *     def parts = [
+ *         MultipartPart.text("a", "alpha"),
+ *         MultipartPart.binary("b", bytes)
+ *     ]
+ *     client.postMultipartSync("/upload", parts)
+ *     }</pre>
+ *   </li>
+ * </ul>
+ *
+ * <h2>SecurityConfig Integration</h2>
+ * <p>
+ * A {@link org.softwood.http.SecurityConfig} may define:
+ * </p>
+ *
+ * <ul>
+ *   <li>TLS enforcement and allowed protocols</li>
+ *   <li>Cookie acceptance policies</li>
+ *   <li>Absolute URL and host allow-list controls (SSRF protection)</li>
+ *   <li>Request/connection timeouts</li>
+ *   <li>Body-size limits</li>
+ *   <li>Logging and metrics options</li>
+ *   <li>Retry/circuit breaker thresholds</li>
+ * </ul>
+ *
+ * <h2>Usage with MockHttpServer</h2>
+ * <p>
+ * Designed to integrate tightly with {@code MockHttpServer} for Spock/JUnit test environments.
+ * Multipart upload tests, cookie validation, and header inspection are fully supported.
+ * </p>
+ *
+ * <h2>Threading Model</h2>
+ * <p>
+ * All work is executed using virtual threads created via:
+ * </p>
+ * <pre>{@code
+ * Thread.ofVirtual().name("http-client-", n).factory()
+ * }</pre>
+ *
+ * <h2>Recommended Use-Cases</h2>
+ * <ul>
+ *   <li>Testing HTTP integrations (with or without MockHttpServer)</li>
+ *   <li>High-concurrency microservices</li>
+ *   <li>Script-friendly command-and-control HTTP workloads</li>
+ *   <li>Secure production usage with hardened SecurityConfig profiles</li>
+ * </ul>
+ *
+ * <h2>Notes</h2>
+ * <p>
+ * This client intentionally wraps Java’s {@code HttpClient} rather than replacing it.
+ * All returned response objects include:
+ * </p>
+ * <ul>
+ *   <li>status code</li>
+ *   <li>headers (Map&lt;String,List&lt;String&gt;&gt;)</li>
+ *   <li>body as String</li>
+ * </ul>
+ *
+ * @author
+ *   Will Woodman / Softwood Consulting Ltd
+ * @since 1.4.0
+ */
 /**
  * GroovyHttpClient — virtual-thread HTTP client with:
  *  - Circuit breaker

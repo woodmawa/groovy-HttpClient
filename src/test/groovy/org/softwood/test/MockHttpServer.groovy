@@ -8,42 +8,222 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
 
 /*
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 /**
- * MockHttpServer.groovy
- * ------------------------------------------------------------
- * A lightweight, embeddable HTTP mock server designed for unit and
- * integration testing of GroovyHttpClient and related HTTP components.
+ * MockHttpServer — A lightweight, dependency-free HTTP test server built on
+ * {@link com.sun.net.httpserver.HttpServer} for validating requests sent by
+ * {@link org.softwood.http.GroovyHttpClient} or any Java/Groovy HTTP client.
  *
- * <p>Provides a declarative API for defining mock endpoints with:</p>
+ * <p>
+ * MockHttpServer is designed for:
+ * </p>
  * <ul>
- *   <li>Expected request methods, paths, headers, and cookies</li>
- *   <li>Configurable response status, headers, and bodies</li>
- *   <li>Response delay simulation for timeout testing</li>
- *   <li>Automatic request validation and diagnostic logging</li>
- *   <li>Configurable delays </li>
- *   <li>Slf4j logging with logback </li>
- *   <li>Safe context creation (no duplicate context errors)</li>
+ *   <li>unit testing</li>
+ *   <li>integration testing</li>
+ *   <li>multipart form upload validation</li>
+ *   <li>header and cookie verification</li>
+ *   <li>fault simulation (delays, bad status codes)</li>
  * </ul>
  *
- * <p>Used by the GroovyHttpClient test suite for validating correctness,
- * concurrency handling, and cookie persistence.</p>
+ * <h2>Key Features</h2>
  *
- * @author  Will Woodman
- * @version 1.0-RELEASE
- * @since   2025-11
+ * <ul>
+ *   <li><strong>Dynamic route registration</strong> using {@code addRequestCheck()}</li>
+ *   <li><strong>Multipart/form-data validation</strong> (field names, filenames, content types, raw body bytes)</li>
+ *   <li><strong>Header and cookie assertions</strong> — mismatches produce automatic 400/500 responses</li>
+ *   <li><strong>Configurable response bodies, cookies, and headers</strong></li>
+ *   <li><strong>Latency simulation</strong> with {@code withDelay(ms)}</li>
+ *   <li><strong>Thread-safe</strong> using a cached executor pool</li>
+ *   <li><strong>No external dependencies</strong> — uses only JDK</li>
+ *   <li><strong>Spock-friendly</strong> for clean BDD test specification</li>
+ * </ul>
+ *
+ * <h2>Primary Use Cases</h2>
+ *
+ * <ol>
+ *   <li>Testing HTTP clients without spinning up real servers</li>
+ *   <li>Validating multipart requests sent via Groovy DSL:
+ *     <pre>{@code
+ * client.postMultipartSync("/upload") { b ->
+ *     b.part {
+ *         name "file1"
+ *         content "hello"
+ *     }
+ * }
+ * }</pre>
+ *   </li>
+ *   <li>Simulating error responses:
+ *     <pre>{@code
+ * server.addRequestCheck("GET", "/fail", 500)
+ * }</pre>
+ *   </li>
+ *   <li>Enforcing cookies across requests (session flow testing)</li>
+ * </ol>
+ *
+ * <h2>Lifecycle</h2>
+ *
+ * <pre>{@code
+ * def server = new MockHttpServer()
+ * server.init()
+ * ...
+ * server.shutdown()
+ * }</pre>
+ *
+ * <p>
+ * {@code init()} binds to a random available port and starts a background
+ * thread executor. All request checks must be registered either before or
+ * after {@code init()} — both flows are supported.
+ * </p>
+ *
+ * <h2>Request Handling Model</h2>
+ *
+ * <p>Each route is backed by a <strong>RequestCheck</strong> instance, which defines:</p>
+ *
+ * <ul>
+ *   <li>expected HTTP method</li>
+ *   <li>expected path</li>
+ *   <li>expected status code for the response</li>
+ *   <li>optional expected headers</li>
+ *   <li>optional expected cookies</li>
+ *   <li>optional expected multipart parts</li>
+ *   <li>response body</li>
+ *   <li>response headers and cookies</li>
+ *   <li>optional artificial delay</li>
+ * </ul>
+ *
+ * <h3>Header Validation</h3>
+ *
+ * <p>Headers may be validated using:</p>
+ *
+ * <pre>{@code
+ * withExpectedHeaders(["X-Test": ["one","two"]])
+ * }</pre>
+ *
+ * <p>
+ * Multiple values per header name are supported. Mismatch → automatic 500 error.
+ * </p>
+ *
+ * <h3>Cookie Validation</h3>
+ *
+ * <pre>{@code
+ * withExpectedCookies([session: "123", mode: "admin"])
+ * }</pre>
+ *
+ * <p>
+ * Missing or mismatched cookies → automatic 400 error.
+ * </p>
+ *
+ * <h3>Multipart Validation</h3>
+ *
+ * MockHttpServer supports detailed parsing and structural validation of
+ * <code>multipart/form-data</code> bodies, including:
+ *
+ * <ul>
+ *   <li>boundary detection</li>
+ *   <li>individual part extraction</li>
+ *   <li>part name, filename</li>
+ *   <li>content-type validation</li>
+ *   <li>binary content byte-for-byte matching</li>
+ * </ul>
+ *
+ * <p>
+ * Example:
+ * </p>
+ *
+ * <pre>{@code
+ * server.addRequestCheck("POST", "/upload", 200)
+ *       .withExpectedMultipart([
+ *           [name: "file1", content: "abc".bytes],
+ *           [name: "meta",  contentType: "application/json"]
+ *       ])
+ * }</pre>
+ *
+ * <h2>Response Builder</h2>
+ *
+ * <pre>{@code
+ * server.addRequestCheck("POST", "/login", 200)
+ *       .withResponseBody('{"ok":true}')
+ *       .withResponseHeaders(["X-Test":"demo"])
+ *       .withResponseCookies([session:"xyz"])
+ * }</pre>
+ *
+ * <p>
+ * Responses can include:
+ * </p>
+ * <ul>
+ *   <li>String body</li>
+ *   <li>text, JSON, or binary content</li>
+ *   <li>Content-Type headers</li>
+ *   <li>Set-Cookie headers</li>
+ * </ul>
+ *
+ * <h2>Simulating Latency</h2>
+ *
+ * <pre>{@code
+ * withDelay(250) // adds a 250ms pause before the response
+ * }</pre>
+ *
+ * <h2>Error Behavior</h2>
+ *
+ * <p>
+ * The mock server enforces strict validation and will produce:
+ * </p>
+ * <ul>
+ *   <li><strong>405</strong> — method does not match expected</li>
+ *   <li><strong>400</strong> — cookie mismatch</li>
+ *   <li><strong>500</strong> — header mismatch, multipart mismatch, or internal error</li>
+ * </ul>
+ *
+ * <h2>Spock-Friendly Examples</h2>
+ *
+ * <pre>{@code
+ * server.addRequestCheck("GET", "/secure", 200)
+ *       .withExpectedCookies([auth:"abc"])
+ *       .withResponseBody("ok")
+ *
+ * client.addCookie("auth", "abc")
+ *
+ * def resp = client.getSync("/secure")
+ * assert resp.statusCode == 200
+ * }</pre>
+ *
+ * <h2>Thread Safety</h2>
+ *
+ * <p>
+ * Routes and request checks are stored in synchronized collections.
+ * All inbound HTTP requests are served through a cached thread pool,
+ * mirroring production concurrency characteristics.
+ * </p>
+ *
+ * <h2>Intended Scope</h2>
+ *
+ * <ul>
+ *   <li>Unit tests</li>
+ *   <li>Client integration tests</li>
+ *   <li>Multipart DSL validation</li>
+ *   <li>Error and timeout simulation</li>
+ *   <li>No dependency framework or container required</li>
+ * </ul>
+ *
+ * @see org.softwood.http.GroovyHttpClient
+ * @see org.softwood.http.MultipartPart
+ * @see org.softwood.http.SecurityConfig
+ *
+ * @author
+ *   Will Woodman / Softwood Consulting Ltd
+ * @since 1.4.0
  */
 /**
  * Lightweight Groovy-based mock HTTP server used for testing GroovyHttpClient.
