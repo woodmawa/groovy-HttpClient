@@ -194,7 +194,7 @@ class GroovyHttpClientCircuitBreakerIntegrationSpec extends Specification {
         }
 
         circuitOpenExceptionClass.isInstance(thirdException)
-        thirdException.message == "Circuit is open"
+        thirdException.message == "Circuit is OPEN"
     }
 
     // Helper method to unwrap CompletionException [cite: 464]

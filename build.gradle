@@ -20,6 +20,8 @@ java {
 //global variables defined in gradle.properties file
 dependencies {
     implementation "org.apache.groovy:groovy:$groovyVersion"
+    implementation "org.apache.groovy:groovy-json:$groovyVersion"
+    implementation "org.apache.groovy:groovy-xml:$groovyVersion"
     implementation("org.slf4j:slf4j-api:2.0.17")
     implementation("ch.qos.logback:logback-classic:1.5.20")
 

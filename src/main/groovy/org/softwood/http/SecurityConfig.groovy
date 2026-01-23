@@ -186,9 +186,7 @@ import java.time.Duration
 @Slf4j
 class SecurityConfig {
 
-    /** -------------------------------
-     * Core connection & behavioral settings
-     * ------------------------------- */
+    // Core
     final String baseUrl
     final Duration connectTimeout
     final Duration requestTimeout
@@ -201,147 +199,109 @@ class SecurityConfig {
     final boolean enableMetrics
     final boolean allowRedirects
 
-    /** -------------------------------
-     * Retry & circuit breaker behavior
-     * ------------------------------- */
+    // Resilience
     final int failureThreshold
     final long resetTimeoutMs
+    final GroovyHttpClient.RetryPolicy retryPolicy
 
-    /** -------------------------------
-     * TLS settings
-     * ------------------------------- */
+    // TLS
     final boolean enforceHostnameVerification
     final List<String> allowedTlsProtocols
     final List<String> allowedCipherSuites
 
-    /**
-     * Internal constructor. This class is immutable; use predefined
-     * profiles or withOverrides() to generate variants.
-     */
     private SecurityConfig(Map args) {
-        this.baseUrl                    = args.baseUrl
-        this.connectTimeout             = (Duration) args.connectTimeout ?: Duration.ofSeconds(10)
-        this.requestTimeout             = (Duration) args.requestTimeout ?: Duration.ofSeconds(30)
-        this.insecureAllowed            = args.insecureAllowed ?: false
-        this.allowAbsoluteUrls          = args.allowAbsoluteUrls ?: false
-        this.maxResponseBytes           = (Long) args.maxResponseBytes ?: 10_000_000L
-        this.cookiePolicy               = args.cookiePolicy as CookiePolicy ?: CookiePolicy.ACCEPT_ORIGINAL_SERVER
-        this.allowedHosts               = (Set) args.allowedHosts ?: [URI.create(baseUrl).host] as Set
-        this.enableLogging              = args.enableLogging ?: false
-        this.enableMetrics              = args.enableMetrics ?: true
-        this.allowRedirects             = args.allowRedirects ?: true
+        this.baseUrl                     = args.baseUrl
+        this.connectTimeout              = (Duration) args.connectTimeout ?: Duration.ofSeconds(10)
+        this.requestTimeout              = (Duration) args.requestTimeout ?: Duration.ofSeconds(30)
+        this.insecureAllowed             = (args.insecureAllowed ?: false) as boolean
+        this.allowAbsoluteUrls           = (args.allowAbsoluteUrls ?: false) as boolean
+        this.maxResponseBytes            = (Long) args.maxResponseBytes ?: 10_000_000L
+        this.cookiePolicy                = args.cookiePolicy as CookiePolicy ?: CookiePolicy.ACCEPT_ORIGINAL_SERVER
+        this.allowedHosts                = (Set) args.allowedHosts ?: [URI.create(baseUrl).host] as Set
+        this.enableLogging               = (args.enableLogging ?: false) as boolean
+        this.enableMetrics               = (args.enableMetrics ?: true) as boolean
+        this.allowRedirects              = (args.allowRedirects ?: true) as boolean
 
-        this.failureThreshold           = (Integer) args.failureThreshold ?: 5
-        this.resetTimeoutMs             = (Long) args.resetTimeoutMs ?: 30_000L
+        this.failureThreshold            = (Integer) args.failureThreshold ?: 5
+        this.resetTimeoutMs              = (Long) args.resetTimeoutMs ?: 30_000L
 
-        this.enforceHostnameVerification = args.enforceHostnameVerification ?: true
+        this.retryPolicy                 = (GroovyHttpClient.RetryPolicy) args.retryPolicy ?: GroovyHttpClient.RetryPolicy.none()
+
+        this.enforceHostnameVerification = (args.enforceHostnameVerification != null) ? (args.enforceHostnameVerification as boolean) : true
         this.allowedTlsProtocols         = (List<String>) args.allowedTlsProtocols ?: ["TLSv1.3"]
-        this.allowedCipherSuites         = (List<String>) args.allowedCipherSuites  ?: []
+        this.allowedCipherSuites         = (List<String>) args.allowedCipherSuites ?: []
     }
 
-    /* ============================================================
-     *  Predefined configuration profiles
-     * ============================================================
-     */
-
-    /**
-     * Strict, production-grade security.
-     * No insecure connections, proper TLS, strict hostname checks.
-     */
     static SecurityConfig production(String baseUrl = "https://example.com") {
         new SecurityConfig([
                 baseUrl                    : baseUrl,
-                insecureAllowed             : false,
-                allowAbsoluteUrls           : false,
-                cookiePolicy                : CookiePolicy.ACCEPT_ORIGINAL_SERVER,
-                enforceHostnameVerification : true,
-                connectTimeout              : Duration.ofSeconds(5),
-                requestTimeout              : Duration.ofSeconds(20),
-                maxResponseBytes            : 10_000_000,
-                allowedTlsProtocols         : ["TLSv1.3"],
-                enableLogging               : false,
-                enableMetrics               : true
+                insecureAllowed            : false,
+                allowAbsoluteUrls          : false,
+                cookiePolicy               : CookiePolicy.ACCEPT_ORIGINAL_SERVER,
+                enforceHostnameVerification: true,
+                connectTimeout             : Duration.ofSeconds(5),
+                requestTimeout             : Duration.ofSeconds(20),
+                maxResponseBytes           : 10_000_000L,
+                allowedTlsProtocols        : ["TLSv1.3"],
+                enableLogging              : false,
+                enableMetrics              : true,
+                retryPolicy                : new GroovyHttpClient.RetryPolicy.Config().tap {
+                    maxAttempts(3)
+                    backoffExponential(200, 2_000, true)
+                    onIoExceptions(true)
+                    onTimeouts(true)
+                    on5xx(true)
+                }.build()
         ])
     }
 
-    /**
-     * Staging environment:
-     * Same as production but with logging enabled.
-     */
     static SecurityConfig staging(String baseUrl = "https://staging.example.com") {
-        new SecurityConfig([
-                baseUrl                    : baseUrl,
-                insecureAllowed             : false,
-                allowAbsoluteUrls           : false,
-                cookiePolicy                : CookiePolicy.ACCEPT_ORIGINAL_SERVER,
-                enforceHostnameVerification : true,
-                connectTimeout              : Duration.ofSeconds(5),
-                requestTimeout              : Duration.ofSeconds(30),
-                enableLogging               : true
+        production(baseUrl).withOverrides([
+                enableLogging: true,
+                requestTimeout: Duration.ofSeconds(30)
         ])
     }
 
-    /**
-     * Testing profile. Allows insecure connections and absolute URLs.
-     */
     static SecurityConfig testing(String baseUrl = "http://localhost:8080") {
         new SecurityConfig([
                 baseUrl          : baseUrl,
-                insecureAllowed   : true,
-                allowAbsoluteUrls : true,
-                cookiePolicy      : CookiePolicy.ACCEPT_ALL,
-                enableLogging     : true,
-                enableMetrics     : false
+                insecureAllowed  : true,
+                allowAbsoluteUrls: true,
+                cookiePolicy     : CookiePolicy.ACCEPT_ALL,
+                enableLogging    : true,
+                enableMetrics    : false,
+                retryPolicy      : new GroovyHttpClient.RetryPolicy.Config().tap {
+                    maxAttempts(1) // default: no retries in tests unless explicitly enabled per request
+                }.build()
         ])
     }
 
-    /**
-     * Local development or unit test environment.
-     * Completely disables all TLS verification.
-     *
-     * WARNING: For testing only. Do not use in production environments.
-     */
     static SecurityConfig trustAll(String baseUrl = "http://localhost:8080") {
         new SecurityConfig([
                 baseUrl                    : baseUrl,
-                insecureAllowed             : true,   // Allow self-signed or invalid certs
-                allowAbsoluteUrls           : true,
-                cookiePolicy                : CookiePolicy.ACCEPT_ALL,
-                enforceHostnameVerification : false,
-                allowedTlsProtocols         : ["TLSv1.3", "TLSv1.2"],
-                allowedCipherSuites         : [],
-
-                connectTimeout              : Duration.ofSeconds(3),
-                requestTimeout              : Duration.ofSeconds(30),
-                failureThreshold            : 1,
-                resetTimeoutMs              : 1000,
-
-                enableLogging               : true,
-                enableMetrics               : false
+                insecureAllowed            : true,
+                allowAbsoluteUrls          : true,
+                cookiePolicy               : CookiePolicy.ACCEPT_ALL,
+                enforceHostnameVerification: false,
+                allowedTlsProtocols        : ["TLSv1.3", "TLSv1.2"],
+                allowedCipherSuites        : [],
+                connectTimeout             : Duration.ofSeconds(3),
+                requestTimeout             : Duration.ofSeconds(30),
+                failureThreshold           : 1,
+                resetTimeoutMs             : 1000L,
+                enableLogging              : true,
+                enableMetrics              : false,
+                retryPolicy                : new GroovyHttpClient.RetryPolicy.Config().tap {
+                    maxAttempts(2)
+                    backoffExponential(50, 250, true)
+                    onIoExceptions(true)
+                    onTimeouts(true)
+                    on5xx(true)
+                }.build()
         ])
     }
 
-    /**
-     * Modify an existing config with overrides.
-     */
     SecurityConfig withOverrides(Map overrides) {
         new SecurityConfig(this.properties + overrides)
-    }
-
-    @Override
-    String toString() {
-        """SecurityConfig(
-  baseUrl=${baseUrl},
-  insecureAllowed=${insecureAllowed},
-  allowAbsoluteUrls=${allowAbsoluteUrls},
-  cookiePolicy=${cookiePolicy},
-  connectTimeout=${connectTimeout},
-  requestTimeout=${requestTimeout},
-  allowedTlsProtocols=${allowedTlsProtocols},
-  enforceHostnameVerification=${enforceHostnameVerification},
-  maxResponseBytes=${maxResponseBytes},
-  enableLogging=${enableLogging},
-  enableMetrics=${enableMetrics}
-)"""
     }
 }
