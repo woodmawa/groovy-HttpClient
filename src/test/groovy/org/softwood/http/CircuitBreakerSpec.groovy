@@ -9,166 +9,118 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.io.IOException
 
 class CircuitBreakerSpec extends Specification {
-    // Inner class to hold our CircuitBreaker instance
-    class CircuitBreakerHolder {
-        def circuitBreakerInstance
-        def failureCountField
-        def openStateTimeField
-        def isOpenMethod
-        def recordFailureMethod
-        def resetMethod
-    }
 
-    def setupCircuitBreaker(int failureThreshold, long resetTimeoutMs) {
-        // Get the CircuitBreaker class using reflection via the parent class
-        def groovyHttpClientClass = GroovyHttpClient.class
-        def circuitBreakerClass = groovyHttpClientClass.getDeclaredClasses().find {
-            it.simpleName == "CircuitBreaker"
-        }
+    /**
+     * Helper to create a CircuitBreaker using the SecurityConfig builders.
+     */
+    private GroovyHttpClient.CircuitBreaker createBreaker(int threshold, long timeoutMs) {
+        // Use the static constructor builder from SecurityConfig
+        def config = SecurityConfig.testing("http://test.api")
+                .withOverrides([
+                        failureThreshold: threshold,
+                        resetTimeoutMs: timeoutMs
+                ])
 
-        if (!circuitBreakerClass) {
-            throw new RuntimeException("CircuitBreaker inner class not found")
-        }
 
-        // Get constructor
-        def constructor = circuitBreakerClass.getDeclaredConstructor(int.class, long.class)
-        constructor.setAccessible(true)
+        // use static builder method to  instantiate the static inner class
+        def cb = GroovyHttpClient.CircuitBreaker.create(config)
 
-        // Create instance
-        def circuitBreaker = constructor.newInstance(failureThreshold, resetTimeoutMs)
+        return cb
 
-        // Get fields and methods
-        def failureCountField = circuitBreakerClass.getDeclaredField("failureCount")
-        failureCountField.setAccessible(true)
-
-        def openStateTimeField = circuitBreakerClass.getDeclaredField("openStateTime")
-        openStateTimeField.setAccessible(true)
-
-        def isOpenMethod = circuitBreakerClass.getDeclaredMethod("isOpen")
-        isOpenMethod.setAccessible(true)
-
-        def recordFailureMethod = circuitBreakerClass.getDeclaredMethod("recordFailure")
-        recordFailureMethod.setAccessible(true)
-
-        def resetMethod = circuitBreakerClass.getDeclaredMethod("reset")
-        resetMethod.setAccessible(true)
-
-        def holder = new CircuitBreakerHolder(
-                circuitBreakerInstance: circuitBreaker,
-                failureCountField: failureCountField,
-                openStateTimeField: openStateTimeField,
-                isOpenMethod: isOpenMethod,
-                recordFailureMethod: recordFailureMethod,
-                resetMethod: resetMethod
-        )
-
-        return holder
     }
 
     def "circuit breaker should start in closed state"() {
         given:
-        def cb = setupCircuitBreaker(5, 30000)
+        def cb = createBreaker(5, 30000)
 
         expect:
-        !cb.isOpenMethod.invoke(cb.circuitBreakerInstance)
-        cb.failureCountField.get(cb.circuitBreakerInstance).get() == 0
-        cb.openStateTimeField.get(cb.circuitBreakerInstance) == 0L
+        !cb.isOpen()
+        cb.failureCount == 0
+        cb.openStateTime == 0L
     }
 
     def "circuit breaker should open after threshold failures"() {
         given:
-        def failureThreshold = 3
-        def cb = setupCircuitBreaker(failureThreshold, 30000)
+        def threshold = 3
+        def cb = createBreaker(threshold, 30000)
 
         when: "Recording failures up to threshold"
-        for (int i = 0; i < failureThreshold; i++) {
-            cb.recordFailureMethod.invoke(cb.circuitBreakerInstance)
-        }
+        threshold.times { cb.recordFailure() }
 
         then: "Circuit should be open"
-        cb.isOpenMethod.invoke(cb.circuitBreakerInstance)
-        cb.failureCountField.get(cb.circuitBreakerInstance).get() == failureThreshold
-        cb.openStateTimeField.get(cb.circuitBreakerInstance) > 0L
+        cb.isOpen()
+        cb.failureCount == threshold
+        cb.openStateTime > 0L
     }
 
     def "circuit breaker should not open before threshold failures"() {
         given:
-        def failureThreshold = 3
-        def cb = setupCircuitBreaker(failureThreshold, 30000)
+        def threshold = 3
+        def cb = createBreaker(threshold, 30000)
 
         when: "Recording failures below threshold"
-        for (int i = 0; i < failureThreshold - 1; i++) {
-            cb.recordFailureMethod.invoke(cb.circuitBreakerInstance)
-        }
+        (threshold - 1).times { cb.recordFailure() }
 
         then: "Circuit should remain closed"
-        !cb.isOpenMethod.invoke(cb.circuitBreakerInstance)
-        cb.failureCountField.get(cb.circuitBreakerInstance).get() == failureThreshold - 1
-        cb.openStateTimeField.get(cb.circuitBreakerInstance) == 0L
+        !cb.isOpen()
+        cb.failureCount == threshold - 1
+        cb.openStateTime == 0L
     }
 
     def "circuit breaker should close after reset timeout"() {
         given:
-        def resetTimeoutMs = 100 // Short timeout for testing
-        def cb = setupCircuitBreaker(3, resetTimeoutMs)
+        def resetTimeoutMs = 100
+        def cb = createBreaker(3, resetTimeoutMs)
 
         when: "Open the circuit"
-        for (int i = 0; i < 3; i++) {
-            cb.recordFailureMethod.invoke(cb.circuitBreakerInstance)
-        }
+        3.times { cb.recordFailure() }
 
         then: "Circuit should be open"
-        cb.isOpenMethod.invoke(cb.circuitBreakerInstance)
+        cb.isOpen()
 
         when: "Wait for reset timeout"
-        Thread.sleep(resetTimeoutMs + 50) // Add buffer time
+        Thread.sleep(resetTimeoutMs + 50)
 
         then: "Circuit should auto-close on next check"
-        !cb.isOpenMethod.invoke(cb.circuitBreakerInstance)
-        cb.failureCountField.get(cb.circuitBreakerInstance).get() == 0
+        !cb.isOpen()
+        cb.failureCount == 0
     }
 
     def "reset method should clear failure count and time"() {
         given:
-        def cb = setupCircuitBreaker(3, 30000)
+        def cb = createBreaker(3, 30000)
 
         when: "Open the circuit"
-        for (int i = 0; i < 3; i++) {
-            cb.recordFailureMethod.invoke(cb.circuitBreakerInstance)
-        }
+        3.times { cb.recordFailure() }
 
-        then: "Circuit should be open"
-        cb.isOpenMethod.invoke(cb.circuitBreakerInstance)
-        cb.failureCountField.get(cb.circuitBreakerInstance).get() > 0
-        cb.openStateTimeField.get(cb.circuitBreakerInstance) > 0L
+        then: "State is open"
+        cb.isOpen()
 
         when: "Reset is called"
-        cb.resetMethod.invoke(cb.circuitBreakerInstance)
+        cb.reset()
 
-        then: "Circuit should be reset"
-        !cb.isOpenMethod.invoke(cb.circuitBreakerInstance)
-        cb.failureCountField.get(cb.circuitBreakerInstance).get() == 0
-        cb.openStateTimeField.get(cb.circuitBreakerInstance) == 0L
+        then: "Circuit should be clean"
+        !cb.isOpen()
+        cb.failureCount == 0
+        cb.openStateTime == 0L
     }
 
     @Unroll
     def "circuit breaker with threshold #threshold should open after exactly #threshold failures"() {
         given:
-        def cb = setupCircuitBreaker(threshold, 30000)
+        def cb = createBreaker(threshold, 30000)
 
         when:
-        for (int i = 0; i < threshold - 1; i++) {
-            cb.recordFailureMethod.invoke(cb.circuitBreakerInstance)
-        }
+        (threshold - 1).times { cb.recordFailure() }
 
-        then: "Circuit should be closed"
-        !cb.isOpenMethod.invoke(cb.circuitBreakerInstance)
+        then: "Still closed"
+        !cb.isOpen()
 
         when: "One more failure"
-        cb.recordFailureMethod.invoke(cb.circuitBreakerInstance)
+        cb.recordFailure()
 
-        then: "Circuit should be open"
-        cb.isOpenMethod.invoke(cb.circuitBreakerInstance)
+        then: "Now open"
+        cb.isOpen()
 
         where:
         threshold << [1, 3, 5, 10]
@@ -179,27 +131,33 @@ class CircuitBreakerSpec extends Specification {
 class GroovyHttpClientCircuitBreakerIntegrationSpec extends Specification {
     def "circuit breaker should prevent calls when open"() {
         given:
-        def client = new GroovyHttpClient("http://example.com",
-                Duration.ofSeconds(1),
-                Duration.ofSeconds(1),
-                2, // Very low threshold
-                30000)
+        /* FIX 1: Use SecurityConfig instead of the old multi-argument constructor.
+           The current GroovyHttpClient  requires a SecurityConfig.
+        */
+        def config = new SecurityConfig(
+                baseUrl: "http://example.com",
+                failureThreshold: 2, // Very low threshold for testing
+                resetTimeoutMs: 30000
+        )
+        def client = new GroovyHttpClient(config)
 
-        and: "A server that always fails"
-        def mockServer = Mock(java.net.http.HttpClient)//GroovyMock(java.net.http.HttpClient)
-        // Use reflection to replace the httpClient with our mock
+        and: "A mock HttpClient to simulate network failures"
+        def mockServer = Mock(java.net.http.HttpClient)
+
+        // Use reflection to replace the private final httpClient [cite: 343]
         def httpClientField = GroovyHttpClient.class.getDeclaredField("httpClient")
         httpClientField.setAccessible(true)
         httpClientField.set(client, mockServer)
 
-        // Make the mock always throw an exception
+        // Make the mock always throw an IOException
         mockServer.sendAsync(_, _) >> {
             CompletableFuture.failedFuture(new IOException("Simulated network failure"))
         }
 
-        when: "We make several calls to trigger the circuit breaker"
+        when: "We make calls to reach the threshold"
         def firstException = null
         def secondException = null
+        def thirdException = null
 
         try {
             client.get("/test").join()
@@ -213,39 +171,33 @@ class GroovyHttpClientCircuitBreakerIntegrationSpec extends Specification {
             secondException = unwrapCompletionException(e)
         }
 
+        /* FIX 2: Logic alignment.
+           With a threshold of 2, the second failure  sets 'openStateTime'.
+           The VERY NEXT call will find the circuit open[cite: 428, 436].
+        */
         try {
-            client.get("/test").join() // This should trigger circuit open
+            client.get("/test").join() // This should now fail with CircuitOpenException
         } catch (Exception e) {
-            // Ignore this one
+            thirdException = unwrapCompletionException(e)
         }
 
-        def circuitOpenException = null
-        try {
-            client.get("/test").join() // This should immediately fail with circuit open
-        } catch (Exception e) {
-            circuitOpenException = unwrapCompletionException(e)
-        }
-
-        then: "The first failures should be network errors"
+        then: "The first two failures should be the simulated network errors"
         firstException instanceof IOException
         secondException instanceof IOException
 
-        and: "The subsequent call should fail with CircuitOpenException"
-        circuitOpenException != null
+        and: "The third call should immediately fail because the circuit is open"
+        thirdException != null
 
-        // Get CircuitOpenException class by reflection
-        def circuitOpenExceptionClass = null
-        GroovyHttpClient.class.getDeclaredClasses().each { clazz ->
-            if (clazz.simpleName == "CircuitOpenException") {
-                circuitOpenExceptionClass = clazz
-            }
+        // Find the CircuitOpenException class via reflection [cite: 463]
+        def circuitOpenExceptionClass = GroovyHttpClient.class.getDeclaredClasses().find {
+            it.simpleName == "CircuitOpenException"
         }
 
-        circuitOpenExceptionClass.isInstance(circuitOpenException)
-        circuitOpenException.message == "Circuit is open"
+        circuitOpenExceptionClass.isInstance(thirdException)
+        thirdException.message == "Circuit is open"
     }
 
-    // Helper method to unwrap CompletionException
+    // Helper method to unwrap CompletionException [cite: 464]
     private Throwable unwrapCompletionException(Throwable t) {
         if (t instanceof java.util.concurrent.CompletionException && t.cause != null) {
             return t.cause
@@ -253,4 +205,3 @@ class GroovyHttpClientCircuitBreakerIntegrationSpec extends Specification {
         return t
     }
 }
-

@@ -6,9 +6,9 @@ def client = new GroovyHttpClient('https://api.restful-api.dev')
 
 try {
 
-    println "try calling url " + client.toString()
+    println "try calling url :  " + client.toString()
     // Asynchronous examples
-    client.get('/objects').thenAccept { response ->
+    def future = client.get('/objects').thenAccept { response ->
         println "Async Response: $response"
     }
 
@@ -22,14 +22,22 @@ try {
         header('Content-Type', 'application/json')
     }
     println "Order created: $newOrder"
-*/
+    */
     // OPTIONS example (sync)
     def optionsResponse = client.optionsSync('/objects')
-    println "Allowed methods: ${optionsResponse.headers().firstValue('Allow').orElse('')}"
+    def str = "allow"
+    List perm = optionsResponse.getHeaders("allow")
+
+    println "Allowed methods: ${perm}"
 
     // HEAD example (sync)
     def headResponse = client.headSync('/objects')
-    println "Content-Type: ${headResponse.headers().firstValue('Content-Type').orElse('')}"
-} finally {
+    def cntType = headResponse.getHeaders('Content-Type')
+    println "Content-Type: ${cntType}"
+} catch (Throwable t) {
+    println "error thrown :" + t.toString()
+    println t.stackTrace
+}finally {
+
     client.close()
 }

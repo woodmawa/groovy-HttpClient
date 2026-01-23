@@ -2,7 +2,6 @@ package org.softwood.http
 
 import groovy.util.logging.Slf4j
 
-import java.net.CookiePolicy
 import java.time.Duration
 
 /*
@@ -221,23 +220,23 @@ class SecurityConfig {
      */
     private SecurityConfig(Map args) {
         this.baseUrl                    = args.baseUrl
-        this.connectTimeout             = args.connectTimeout ?: Duration.ofSeconds(10)
-        this.requestTimeout             = args.requestTimeout ?: Duration.ofSeconds(30)
+        this.connectTimeout             = (Duration) args.connectTimeout ?: Duration.ofSeconds(10)
+        this.requestTimeout             = (Duration) args.requestTimeout ?: Duration.ofSeconds(30)
         this.insecureAllowed            = args.insecureAllowed ?: false
         this.allowAbsoluteUrls          = args.allowAbsoluteUrls ?: false
-        this.maxResponseBytes           = args.maxResponseBytes ?: 10_000_000L
-        this.cookiePolicy               = args.cookiePolicy ?: CookiePolicy.ACCEPT_ORIGINAL_SERVER
-        this.allowedHosts               = args.allowedHosts ?: [URI.create(baseUrl).host] as Set
+        this.maxResponseBytes           = (Long) args.maxResponseBytes ?: 10_000_000L
+        this.cookiePolicy               = args.cookiePolicy as CookiePolicy ?: CookiePolicy.ACCEPT_ORIGINAL_SERVER
+        this.allowedHosts               = (Set) args.allowedHosts ?: [URI.create(baseUrl).host] as Set
         this.enableLogging              = args.enableLogging ?: false
         this.enableMetrics              = args.enableMetrics ?: true
         this.allowRedirects             = args.allowRedirects ?: true
 
-        this.failureThreshold           = args.failureThreshold ?: 5
-        this.resetTimeoutMs             = args.resetTimeoutMs ?: 30_000L
+        this.failureThreshold           = (Integer) args.failureThreshold ?: 5
+        this.resetTimeoutMs             = (Long) args.resetTimeoutMs ?: 30_000L
 
         this.enforceHostnameVerification = args.enforceHostnameVerification ?: true
-        this.allowedTlsProtocols         = args.allowedTlsProtocols ?: ["TLSv1.3"]
-        this.allowedCipherSuites         = args.allowedCipherSuites ?: []
+        this.allowedTlsProtocols         = (List<String>) args.allowedTlsProtocols ?: ["TLSv1.3"]
+        this.allowedCipherSuites         = (List<String>) args.allowedCipherSuites  ?: []
     }
 
     /* ============================================================

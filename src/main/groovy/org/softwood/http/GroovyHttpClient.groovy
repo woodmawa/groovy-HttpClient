@@ -1,5 +1,6 @@
 package org.softwood.http
 
+import groovy.transform.Immutable
 import groovy.util.logging.Slf4j
 
 import javax.net.ssl.SSLContext
@@ -159,6 +160,8 @@ import java.util.function.Supplier
  *  - Multipart upload & file download
  *  - Groovy DSL for request configuration
  */
+
+
 @Slf4j
 class GroovyHttpClient implements AutoCloseable {
 
@@ -202,6 +205,139 @@ class GroovyHttpClient implements AutoCloseable {
      * unless an explicit Cookie header is already set.
      */
     final SimpleCookieHandler cookieHandler = new SimpleCookieHandler()
+
+
+    /**
+     * Fluent builder for GroovyHttpClient.
+     */
+    static class Builder {
+        private String baseUrl
+        private Duration connectTimeout
+        private Duration requestTimeout
+        private boolean insecureAllowed = false
+        private boolean allowAbsoluteUrls = false
+        private long maxResponseBytes = 10_000_000L
+        private CookiePolicy cookiePolicy
+        private Set<String> allowedHosts
+        private boolean enableLogging = false
+        private boolean enableMetrics = true
+        private boolean allowRedirects = true
+        private int failureThreshold = 5
+        private long resetTimeoutMs = 30_000L
+        private boolean enforceHostnameVerification = true
+        private List<String> allowedTlsProtocols = ["TLSv1.3"]
+        private List<String> allowedCipherSuites = []
+
+        Builder(String baseUrl) {
+            this.baseUrl = baseUrl
+        }
+
+        Builder connectTimeout(Duration timeout) {
+            this.connectTimeout = timeout
+            return this
+        }
+
+        Builder requestTimeout(Duration timeout) {
+            this.requestTimeout = timeout
+            return this
+        }
+
+        Builder insecureAllowed(boolean allowed) {
+            this.insecureAllowed = allowed
+            return this
+        }
+
+        Builder allowAbsoluteUrls(boolean allowed) {
+            this.allowAbsoluteUrls = allowed
+            return this
+        }
+
+        Builder maxResponseBytes(long bytes) {
+            this.maxResponseBytes = bytes
+            return this
+        }
+
+        Builder cookiePolicy(CookiePolicy policy) {
+            this.cookiePolicy = policy
+            return this
+        }
+
+        Builder allowedHosts(Set<String> hosts) {
+            this.allowedHosts = hosts
+            return this
+        }
+
+        Builder enableLogging(boolean enabled) {
+            this.enableLogging = enabled
+            return this
+        }
+
+        Builder enableMetrics(boolean enabled) {
+            this.enableMetrics = enabled
+            return this
+        }
+
+        Builder allowRedirects(boolean allowed) {
+            this.allowRedirects = allowed
+            return this
+        }
+
+        Builder failureThreshold(int threshold) {
+            this.failureThreshold = threshold
+            return this
+        }
+
+        Builder resetTimeoutMs(long timeoutMs) {
+            this.resetTimeoutMs = timeoutMs
+            return this
+        }
+
+        Builder enforceHostnameVerification(boolean enforce) {
+            this.enforceHostnameVerification = enforce
+            return this
+        }
+
+        Builder allowedTlsProtocols(List<String> protocols) {
+            this.allowedTlsProtocols = protocols
+            return this
+        }
+
+        Builder allowedCipherSuites(List<String> suites) {
+            this.allowedCipherSuites = suites
+            return this
+        }
+
+        GroovyHttpClient build() {
+            def config = new SecurityConfig([
+                    baseUrl                    : baseUrl,
+                    connectTimeout             : connectTimeout,
+                    requestTimeout             : requestTimeout,
+                    insecureAllowed            : insecureAllowed,
+                    allowAbsoluteUrls          : allowAbsoluteUrls,
+                    maxResponseBytes           : maxResponseBytes,
+                    cookiePolicy               : cookiePolicy,
+                    allowedHosts               : allowedHosts ?: [URI.create(baseUrl).host] as Set,
+                    enableLogging              : enableLogging,
+                    enableMetrics              : enableMetrics,
+                    allowRedirects             : allowRedirects,
+                    failureThreshold           : failureThreshold,
+                    resetTimeoutMs             : resetTimeoutMs,
+                    enforceHostnameVerification: enforceHostnameVerification,
+                    allowedTlsProtocols        : allowedTlsProtocols,
+                    allowedCipherSuites        : allowedCipherSuites
+            ])
+
+            return new GroovyHttpClient(config)
+        }
+    }
+
+    /**
+    * Factory method to create a builder instance.
+    */
+    static Builder builder(String baseUrl) {
+        return new Builder(baseUrl)
+    }
+
 
     // -------------------------------------------------------------------------
     // Constructors
@@ -433,10 +569,15 @@ class GroovyHttpClient implements AutoCloseable {
             entry?.value?.get(0)
         }
 
+        Map getHeadersAsMap () {
+            headers.asImmutable()
+        }
+
         List<String> getHeaders(String name) {
             headers.findAll { k, v -> k.equalsIgnoreCase(name) }
                     .values()
                     .flatten() as List<String>
+
         }
 
         boolean hasHeader(String name) {
@@ -972,6 +1113,13 @@ Content-Type: ${part.contentType}\r
         private final AtomicInteger failureCount = new AtomicInteger(0)
         private volatile long openStateTime = 0
 
+        // Add a public static factory method
+        public static CircuitBreaker create(SecurityConfig config) {
+            assert config, "must call with non null SecurityConfig"
+            return new CircuitBreaker(config.failureThreshold, config.resetTimeoutMs)
+
+        }
+
         CircuitBreaker(int failureThreshold, long resetTimeoutMs) {
             this.failureThreshold = failureThreshold
             this.resetTimeoutMs = resetTimeoutMs
@@ -998,6 +1146,23 @@ Content-Type: ${part.contentType}\r
         void reset() {
             failureCount.set(0)
             openStateTime = 0
+        }
+
+        //provide get property helpers for private final values
+        int getFailureThreshold() {
+            failureThreshold
+        }
+
+        long getResetTimeoutMs () {
+            resetTimeoutMs
+        }
+
+        int getFailureCount () {
+            failureCount.get()
+        }
+
+        long getOpenStateTime (){
+            openStateTime
         }
     }
 
