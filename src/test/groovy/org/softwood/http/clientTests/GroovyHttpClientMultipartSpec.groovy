@@ -1,12 +1,12 @@
-package org.softwood.http
+package org.softwood.http.clientTests
 
 import groovy.util.logging.Slf4j
+import org.softwood.http.GroovyHttpClient
 import org.softwood.http.MultipartPart
 import org.softwood.test.MockHttpServer
 import org.softwood.http.SecurityConfig
 import spock.lang.Specification
 import spock.lang.Timeout
-import spock.lang.Shared
 
 /**
  * Multipart upload & file download tests for GroovyHttpClient.

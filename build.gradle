@@ -2,10 +2,14 @@ plugins {
     id 'groovy'
     id 'maven-publish'
     id 'signing'
+    id 'org.asciidoctor.jvm.convert' version '4.0.2'
+    id 'org.asciidoctor.jvm.pdf' version '4.0.2'
+    // Nexus publish plugin for Maven Central
+    id 'io.github.gradle-nexus.publish-plugin' version '2.0.0'
 }
 
-group = 'org.softwood'
-version = '1.0-PRODUCTION'
+group = 'io.github.woodmawa'  // Or 'io.github.woodmawa' if using GitHub-based group
+version = '1.0.0'  // Use 1.5.0-SNAPSHOT for development, 1.5.0 for release
 
 repositories {
     mavenCentral()
@@ -13,11 +17,18 @@ repositories {
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(25)
+        languageVersion = JavaLanguageVersion.of(25)  // Maven Central requires Java 8+
     }
+
+    // Produce Java 21-compatible bytecode
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+
+    // Required for Maven Central
+    withSourcesJar()
+    withJavadocJar()
 }
 
-//global variables defined in gradle.properties file
 dependencies {
     implementation "org.apache.groovy:groovy:$groovyVersion"
     implementation "org.apache.groovy:groovy-json:$groovyVersion"
@@ -27,45 +38,72 @@ dependencies {
 
     testImplementation "org.spockframework:spock-core:$spockVersion"
     testImplementation platform('org.junit:junit-bom:6.0.1')
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'  //no longer pulled in automatically
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation("net.bytebuddy:byte-buddy:1.17.8")
 
-    // Jetty 12.0.x HTTP/2 + ALPN (compatible with WireMock's Jetty12 adapter)
-    // Jetty 12 (HTTP/2 + ALPN + Servlet EE10)
     testImplementation "org.eclipse.jetty:jetty-server:$jettyVersion"
     testImplementation "org.eclipse.jetty:jetty-alpn-java-server:$jettyVersion"
     testImplementation "org.eclipse.jetty.http2:jetty-http2-server:$jettyVersion"
     testImplementation "org.eclipse.jetty.http2:jetty-http2-common:$jettyVersion"
     testImplementation "org.eclipse.jetty.ee10:jetty-ee10-servlet:$jettyVersion"
-
-
 }
 
-java {
-    withSourcesJar()
-    withJavadocJar()
+// Ensure Java 21 bytecode for all compile tasks
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+}
+
+tasks.withType(GroovyCompile).configureEach {
+    sourceCompatibility = '21'
+    targetCompatibility = '21'
 }
 
 test {
     useJUnitPlatform()
 }
 
-// Publishing configuration
+// Javadoc configuration - required for Maven Central
+javadoc {
+    if(JavaVersion.current().isJava9Compatible()) {
+        options.addBooleanOption('html5', true)
+    }
+    // Suppress warnings for Groovy code
+    options.addStringOption('Xdoclint:none', '-quiet')
+}
+
+// Groovydoc is automatically created by the groovy plugin
+// Configure it instead of registering a new one
+groovydoc {
+    // Optional: customize groovydoc settings
+    // docTitle = "Groovy HTTP Client API"
+    // windowTitle = "Groovy HTTP Client API"
+}
+
+// Publishing configuration for Maven Central
 publishing {
     publications {
         mavenJava(MavenPublication) {
             from components.java
 
+            // Artifact coordinates
+            groupId = project.group
+            artifactId = 'groovy-httpclient'  // Note: lowercase, no camelCase
+            version = project.version
+
+            // Required POM metadata for Maven Central
             pom {
-                name = project.name
-                description = 'A Groovy library'
+                name = 'Groovy HTTP Client'
+                description = 'A modern, production-ready HTTP client for Groovy and Java applications, built on Java HttpClient with virtual threads, comprehensive security controls, and powerful testing framework'
                 url = 'https://github.com/woodmawa/groovy-HttpClient'
+
+                // Required: Inception year
+                inceptionYear = '2025'
 
                 licenses {
                     license {
                         name = 'The Apache License, Version 2.0'
-                        url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                        url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
                     }
                 }
 
@@ -73,71 +111,109 @@ publishing {
                     developer {
                         id = 'woodmawa'
                         name = 'William Woodman'
-                        email = 'will.woodman@outlook.com'
+                        email = 'will.woodman.softwood@outlook.com'
+                        organization = 'Softwood Consulting Ltd'
+                        organizationUrl = 'https://github.com/woodmawa'
                     }
                 }
 
                 scm {
                     connection = 'scm:git:git://github.com/woodmawa/groovy-HttpClient.git'
-                    developerConnection = 'scm:git:ssh://github.com/woodmawa/groovy-HttpClient.git'
+                    developerConnection = 'scm:git:ssh://git@github.com/woodmawa/groovy-HttpClient.git'
                     url = 'https://github.com/woodmawa/groovy-HttpClient'
                 }
-            }
-        }
-    }
 
-    // Configure repositories
-    repositories {
-        // Local Maven repository
-        maven {
-            name = 'localRepo'
-            url = layout.buildDirectory.dir('repo')
-        }
-
-        // Remote Maven repository (conditional configuration based on credentials)
-        // Remote Maven repository (conditional configuration based on credentials)
-        maven {
-            name = 'remoteRepo'
-            url = project.hasProperty('remoteRepoUrl') ? project.property('remoteRepoUrl') : "https://repo.example.com/repository/maven-releases/"
-
-            // Check if credentials are present before configuring them
-            def user = project.findProperty('mavenUsername') ?: System.getenv('MAVEN_USERNAME')
-            def pass = project.findProperty('mavenPassword') ?: System.getenv('MAVEN_PASSWORD')
-
-            if (user && pass) {
-                credentials {
-                    username = user
-                    password = pass
+                // Issue management
+                issueManagement {
+                    system = 'GitHub Issues'
+                    url = 'https://github.com/woodmawa/groovy-HttpClient/issues'
                 }
-            } else {
-                // If credentials are missing, you can skip configuration
-                // or use a flag to prevent the publish task from being created.
-                // For now, simply finding the properties above is sufficient
-                // as the publish task won't be created unless required properties are met.
             }
         }
     }
 }
 
-// Optional signing configuration for published artifacts
+// Signing configuration - required for Maven Central
 signing {
-    required { gradle.taskGraph.hasTask("publish") }
-    sign publishing.publications.mavenJava
-}
 
-// Task to publish to the local repository
-tasks.register('publishToLocalRepo') {
-    dependsOn 'publishMavenJavaPublicationToLocalRepoRepository'
-    doLast {
-        println "Published to local repository: ${layout.buildDirectory.dir('repo').get().asFile}"
+    // 1. Only require signing for actual release tasks
+    // Check inside the closure so it evaluates at the right time
+    required {
+        gradle.taskGraph.hasTask("publishToSonatype") ||
+                gradle.taskGraph.hasTask("publishToMavenCentral")
+    }
+
+    // 2. Modern GPG support (Optional but better for Gpg4win)
+    // If you use this, you don't need the secretKeyRingFile property
+    // useGpgCmd()
+
+    // 3. Keep your current logic but ensure it points to the right publication
+    def signingKey = findProperty("signing.keyId")
+    def signingPassword = findProperty("signing.password")
+    def signingSecretKeyRingFile = findProperty("signing.secretKeyRingFile")
+
+    if (signingKey && signingPassword && signingSecretKeyRingFile) {
+        sign publishing.publications.mavenJava
     }
 }
 
-// Task to publish to the remote repository
-tasks.register('publishToRemoteRepo') {
-    dependsOn 'publishMavenJavaPublicationToRemoteRepoRepository'
-    doLast {
-        println "Published to remote repository"
-    }
+// FORCE publishToMavenLocal to wait for the signing task
+tasks.withType(PublishToMavenLocal) {
+    dependsOn tasks.withType(Sign)
 }
 
+// Nexus publishing plugin configuration
+nexusPublishing {
+    repositories {
+        sonatype {
+            // New URL for the Central Portal Staging API
+            nexusUrl.set(uri("https://ossrh-staging-api.central.sonatype.com/service/local/"))
+            snapshotRepositoryUrl.set(uri("https://central.sonatype.com/repository/maven-snapshots/"))
+
+            // Use your User Token credentials
+            username = findProperty("ossrhUsername")
+            password = findProperty("ossrhPassword")
+        }
+    }
+    // Optional: Keeps the connection stable during the upload
+    connectTimeout = Duration.ofMinutes(3)
+    clientTimeout = Duration.ofMinutes(3)
+}
+
+// Asciidoctor configuration
+asciidoctor {
+    sourceDir = file('docs')
+    sources {
+        include 'index.adoc'
+    }
+    outputDir = file('build/docs/html5')
+
+    // Set base directory so includes work
+    baseDirFollowsSourceDir()
+
+    attributes = [
+            'source-highlighter': 'rouge',
+            'toc': 'left',
+            'toclevels': 3,
+            'sectnums': '',
+            'icons': 'font',
+            'version': project.version
+    ]
+}
+
+asciidoctorPdf {
+    sourceDir = file('docs')
+    sources {
+        include 'index.adoc'
+    }
+    outputDir = file('build/docs/pdf')
+
+    // Set base directory so includes work
+    baseDirFollowsSourceDir()
+
+    attributes = [
+            'source-highlighter': 'rouge',
+            'version': project.version,
+            'backend': 'pdf'
+    ]
+}

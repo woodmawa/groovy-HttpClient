@@ -21,6 +21,7 @@ import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
@@ -384,9 +385,8 @@ class GroovyHttpClient implements AutoCloseable {
 
     private class GroovyRequestBuilder {
         private final HttpRequest.Builder builder
-        private final Map<String, List<String>> headers = [:].withDefault { [] }
-
-        private final Map<String, List<String>> queryParams = [:].withDefault { [] }
+        private final Map<String, List<String>> headers = new ConcurrentHashMap<String, List<String>>()
+        private final Map<String, List<String>> queryParams = new ConcurrentHashMap<String, List<String>>()
         private RetryPolicy retryOverride
 
         private HttpRequest.BodyPublisher bodyPublisher = null
@@ -396,7 +396,7 @@ class GroovyHttpClient implements AutoCloseable {
 
         void header(String name, String value) {
             builder.header(name, value)
-            headers[name] << value
+            headers.computeIfAbsent(name) { new CopyOnWriteArrayList<String>() } << value
         }
 
         boolean hasHeader(String name) {
@@ -416,10 +416,15 @@ class GroovyHttpClient implements AutoCloseable {
         void query(Map<String, ?> params) {
             params?.each { k, v ->
                 if (v == null) return
+                def key = k.toString()
                 if (v instanceof Iterable) {
-                    v.each { vv -> if (vv != null) queryParams[k.toString()] << vv.toString() }
+                    v.each { vv ->
+                        if (vv != null) {
+                            this.@queryParams.computeIfAbsent(key) { new CopyOnWriteArrayList<String>() } << vv.toString()
+                        }
+                    }
                 } else {
-                    queryParams[k.toString()] << v.toString()
+                    this.@queryParams.computeIfAbsent(key) { new CopyOnWriteArrayList<String>() } << v.toString()
                 }
             }
         }
@@ -433,7 +438,7 @@ class GroovyHttpClient implements AutoCloseable {
 
         /** JSON encode + set Content-Type */
         void json(Object obj, Charset charset = Charset.forName("UTF-8")) {
-            def jsonText = (obj instanceof CharSequence) ? obj.toString() : JsonOutput.toJson(obj)
+            def jsonText = (obj instanceof CharSequence) ? obj.toString() : groovy.json.JsonOutput.toJson(obj)
             bodyPublisher = HttpRequest.BodyPublishers.ofString(jsonText, charset)
             bodyContentType = "application/json; charset=${charset.name()}"
         }
@@ -449,7 +454,16 @@ class GroovyHttpClient implements AutoCloseable {
 
         RetryPolicy getRetryPolicyOrNull() { retryOverride }
 
-        Map<String, List<String>> getQueryParams() { queryParams.collectEntries { k, v -> [(k): v.toList()] } }
+        Map<String, List<String>> getQueryParams() {
+            if (this.@queryParams.isEmpty()) {
+                return [:]
+            }
+            def result = [:]
+            this.@queryParams.each { k, v ->
+                result[k] = new ArrayList<String>(v)
+            }
+            result
+        }
 
         HttpRequest.BodyPublisher getBodyPublisherOrNull() { bodyPublisher }
         String getBodyContentTypeOrNull() { bodyContentType }
@@ -458,7 +472,9 @@ class GroovyHttpClient implements AutoCloseable {
 
         HttpRequest.Builder unwrap() { builder }
 
-        Map<String, List<String>> getHeaders() { headers.collectEntries { k, v -> [(k): v.toList()] } }
+        Map<String, List<String>> getHeaders() {
+            new HashMap<String, List<String>>(headers).collectEntries { k, v -> [(k): new ArrayList<String>(v)] }
+        }
     }
 
     /* =========================================================================
@@ -712,10 +728,11 @@ class GroovyHttpClient implements AutoCloseable {
 
         // DSL
         if (cfg) {
-            if (cfg.maximumNumberOfParameters == 1) cfg.call(wrapped)
-            else {
-                cfg.delegate = wrapped
-                cfg.resolveStrategy = Closure.DELEGATE_ONLY
+            cfg.delegate = wrapped
+            cfg.resolveStrategy = Closure.DELEGATE_FIRST
+            if (cfg.maximumNumberOfParameters == 1) {
+                cfg.call(wrapped)
+            } else {
                 cfg.call()
             }
         }
@@ -1101,10 +1118,11 @@ class GroovyHttpClient implements AutoCloseable {
         defaultHeaders.each { n, vs -> vs?.each { wrapped.header(n, it) } }
 
         if (cfg) {
-            if (cfg.maximumNumberOfParameters == 1) cfg.call(wrapped)
-            else {
-                cfg.delegate = wrapped
-                cfg.resolveStrategy = Closure.DELEGATE_ONLY
+            cfg.delegate = wrapped
+            cfg.resolveStrategy = Closure.DELEGATE_FIRST
+            if (cfg.maximumNumberOfParameters == 1) {
+                cfg.call(wrapped)
+            } else {
                 cfg.call()
             }
         }
@@ -1260,7 +1278,7 @@ class GroovyHttpClient implements AutoCloseable {
      * Circuit breaker + exceptions
      * ========================================================================= */
 
-    private static class CircuitBreaker {
+    static class CircuitBreaker {
         private final int failureThreshold
         private final long resetTimeoutMs
         private final AtomicInteger failureCount = new AtomicInteger(0)

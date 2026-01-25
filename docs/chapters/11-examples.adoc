@@ -1,0 +1,1027 @@
+[[examples]]
+= Real-World Examples
+
+== Overview
+
+This chapter provides practical, real-world examples demonstrating common usage patterns for GroovyHttpClient. Each example includes complete, runnable code that you can adapt for your own projects.
+
+[TIP]
+====
+All examples in this chapter are adapted from actual tests in the project. You can find more examples in the test suite at:
+
+* `src/test/groovy/org/softwood/http/clientTests/` - Client functionality tests
+* `src/test/groovy/org/softwood/http/testingFrameworkTests/` - Testing framework examples
+
+These tests serve as both documentation and validation of the library's features.
+====
+
+== Basic HTTP Operations
+
+=== Simple GET Request
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient
+
+// Create client
+def client = new GroovyHttpClient("https://api.github.com")
+
+// Make GET request
+def response = client.getSync("/users/octocat")
+
+// Access response data
+println "Status: ${response.statusCode}"
+println "User: ${response.json.name}"
+println "Location: ${response.json.location}"
+
+// Response: 200
+// User: The Octocat
+// Location: San Francisco
+----
+
+=== POST with JSON Body
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient
+
+def client = new GroovyHttpClient("https://api.example.com")
+
+// Create user
+def userData = [
+    name: "Alice Smith",
+    email: "alice@example.com",
+    roles: ["user", "admin"],
+    metadata: [
+        department: "Engineering",
+        start_date: "2025-01-24"
+    ]
+]
+
+def response = client.postSync("/users", null) {
+    json(userData)
+}
+
+println "Created user ID: ${response.json.id}"
+println "Status: ${response.json.status}"
+----
+
+=== PUT Request to Update Resource
+
+[source,groovy]
+----
+def client = new GroovyHttpClient("https://api.example.com")
+
+// Update user
+def updates = [
+    email: "alice.smith@example.com",
+    roles: ["user", "admin", "moderator"]
+]
+
+def response = client.putSync("/users/123", null) {
+    json(updates)
+    header "Authorization", "Bearer ${authToken}"
+}
+
+assert response.statusCode == 200
+println "User updated: ${response.json}"
+----
+
+=== DELETE Request
+
+[source,groovy]
+----
+def client = new GroovyHttpClient("https://api.example.com")
+
+def response = client.deleteSync("/users/123") {
+    header "Authorization", "Bearer ${authToken}"
+}
+
+assert response.statusCode == 204  // No Content
+println "User deleted successfully"
+----
+
+== Authentication Patterns
+
+=== Bearer Token Authentication
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient
+
+def client = new GroovyHttpClient("https://api.example.com")
+
+// Set default auth header for all requests
+def authToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+client.setHeader("Authorization", "Bearer ${authToken}")
+
+// All requests now include auth header
+def users = client.getSync("/users").json
+def posts = client.getSync("/posts").json
+def profile = client.getSync("/profile").json
+----
+
+=== API Key Authentication
+
+[source,groovy]
+----
+def client = new GroovyHttpClient("https://api.example.com")
+
+// API key in header
+client.setHeader("X-API-Key", "sk_live_abc123xyz789")
+
+// Or in query parameter
+def response = client.getSync("/data") {
+    query(api_key: "sk_live_abc123xyz789")
+}
+----
+
+=== Basic Authentication
+
+[source,groovy]
+----
+def client = new GroovyHttpClient("https://api.example.com")
+
+def username = "alice"
+def password = "secret123"
+def credentials = "${username}:${password}".bytes.encodeBase64().toString()
+
+client.setHeader("Authorization", "Basic ${credentials}")
+
+def response = client.getSync("/protected/resource")
+----
+
+=== OAuth 2.0 Flow
+
+[source,groovy]
+----
+class OAuth2Client {
+    private final GroovyHttpClient client
+    private String accessToken
+    private long tokenExpiry
+    
+    OAuth2Client(String baseUrl, String clientId, String clientSecret) {
+        this.client = new GroovyHttpClient(baseUrl)
+        refreshToken(clientId, clientSecret)
+    }
+    
+    private void refreshToken(String clientId, String clientSecret) {
+        def tokenResponse = client.postSync("/oauth/token", null) {
+            form(
+                grant_type: "client_credentials",
+                client_id: clientId,
+                client_secret: clientSecret
+            )
+        }
+        
+        this.accessToken = tokenResponse.json.access_token
+        this.tokenExpiry = System.currentTimeMillis() + 
+                          (tokenResponse.json.expires_in * 1000)
+    }
+    
+    def getProtectedResource(String path) {
+        // Auto-refresh if token expired
+        if (System.currentTimeMillis() >= tokenExpiry) {
+            refreshToken(clientId, clientSecret)
+        }
+        
+        return client.getSync(path) {
+            header "Authorization", "Bearer ${accessToken}"
+        }
+    }
+}
+
+// Usage
+def oauth = new OAuth2Client(
+    "https://api.example.com",
+    "client_id_123",
+    "client_secret_xyz"
+)
+
+def data = oauth.getProtectedResource("/api/data").json
+----
+
+== Query Parameters
+
+=== Simple Query Parameters
+
+[source,groovy]
+----
+def client = new GroovyHttpClient("https://api.example.com")
+
+// Search with filters
+def response = client.getSync("/products") {
+    query(
+        category: "electronics",
+        min_price: 100,
+        max_price: 500,
+        in_stock: true,
+        sort: "price_asc"
+    )
+}
+
+// URL: /products?category=electronics&min_price=100&max_price=500&in_stock=true&sort=price_asc
+
+def products = response.json.results
+products.each { product ->
+    println "${product.name}: $${product.price}"
+}
+----
+
+=== Array Query Parameters
+
+[source,groovy]
+----
+// Multiple values for same parameter
+def response = client.getSync("/articles") {
+    query(
+        tags: ["groovy", "http", "api"],
+        status: ["published", "featured"]
+    )
+}
+
+// URL: /articles?tags=groovy&tags=http&tags=api&status=published&status=featured
+----
+
+=== Pagination
+
+[source,groovy]
+----
+def client = new GroovyHttpClient("https://api.example.com")
+
+def fetchAllPages(String endpoint) {
+    def allResults = []
+    def page = 1
+    def hasMore = true
+    
+    while (hasMore) {
+        def response = client.getSync(endpoint) {
+            query(page: page, per_page: 100)
+        }
+        
+        def data = response.json
+        allResults.addAll(data.results)
+        
+        hasMore = data.has_more
+        page++
+    }
+    
+    return allResults
+}
+
+// Fetch all users across multiple pages
+def allUsers = fetchAllPages("/users")
+println "Total users: ${allUsers.size()}"
+----
+
+== File Operations
+
+=== Upload Single File
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient
+
+def client = new GroovyHttpClient("https://api.example.com")
+
+// Read file
+def file = new File("report.pdf")
+def fileBytes = file.bytes
+
+// Upload using DSL
+def response = client.postMultipartSync("/documents") {
+    part {
+        name "file"
+        filename file.name
+        contentType "application/pdf"
+        data fileBytes
+    }
+    
+    part {
+        name "title"
+        content "Monthly Report"
+    }
+    
+    part {
+        name "category"
+        content "reports"
+    }
+    
+    header "Authorization", "Bearer ${authToken}"
+}
+
+println "Document uploaded: ${response.json.document_id}"
+----
+
+=== Upload Multiple Files
+
+[source,groovy]
+----
+import org.softwood.http.MultipartPart
+
+def client = new GroovyHttpClient("https://api.example.com")
+
+// Prepare files
+def files = [
+    new File("invoice.pdf"),
+    new File("receipt.pdf"),
+    new File("contract.pdf")
+]
+
+// Build parts
+def parts = files.collect { file ->
+    MultipartPart.bytes(
+        "documents",  // Same name for all
+        file.name,
+        "application/pdf",
+        file.bytes
+    )
+}
+
+// Add metadata part
+parts << MultipartPart.json(
+    "metadata",
+    groovy.json.JsonOutput.toJson([
+        batch_id: UUID.randomUUID().toString(),
+        uploaded_by: "alice",
+        timestamp: new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'")
+    ])
+)
+
+// Upload
+def response = client.postMultipartSync("/batch-upload", parts) {
+    header "Authorization", "Bearer ${authToken}"
+}
+
+println "Uploaded ${response.json.count} files"
+----
+
+=== Download File
+
+[source,groovy]
+----
+def client = new GroovyHttpClient("https://api.example.com")
+
+// Download file
+def fileBytes = client.downloadBytesSync("/files/document.pdf") {
+    header "Authorization", "Bearer ${authToken}"
+}
+
+// Save to disk
+new File("downloaded_document.pdf").bytes = fileBytes
+
+println "Downloaded ${fileBytes.length} bytes"
+----
+
+=== Download with Progress Tracking
+
+[source,groovy]
+----
+import java.util.concurrent.atomic.AtomicLong
+
+def client = new GroovyHttpClient("https://api.example.com")
+
+// Add progress tracking interceptor
+def bytesDownloaded = new AtomicLong(0)
+
+client.addInterceptor { ctx, next ->
+    def start = System.currentTimeMillis()
+    
+    next.call(ctx).thenApply { response ->
+        def elapsed = System.currentTimeMillis() - start
+        def size = response.bytes.length
+        bytesDownloaded.addAndGet(size)
+        
+        println "Downloaded ${size} bytes in ${elapsed}ms"
+        response
+    }
+}
+
+// Download file
+def fileBytes = client.downloadBytesSync("/large-file.zip")
+println "Total downloaded: ${bytesDownloaded.get()} bytes"
+----
+
+== Error Handling
+
+=== Handling HTTP Errors
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient
+
+def client = new GroovyHttpClient("https://api.example.com")
+
+try {
+    def response = client.getSync("/users/999")
+    println "User: ${response.json}"
+    
+} catch (GroovyHttpClient.HttpResponseException e) {
+    switch (e.statusCode) {
+        case 400:
+            println "Bad request: ${e.message}"
+            break
+        case 401:
+            println "Unauthorized - check your credentials"
+            break
+        case 404:
+            println "User not found"
+            break
+        case 500:
+            println "Server error - try again later"
+            break
+        default:
+            println "HTTP error ${e.statusCode}: ${e.message}"
+    }
+} catch (IOException e) {
+    println "Network error: ${e.message}"
+} catch (java.net.http.HttpTimeoutException e) {
+    println "Request timed out"
+}
+----
+
+=== Retry with Exponential Backoff
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient.RetryPolicy
+import org.softwood.http.SecurityConfig
+
+def retryPolicy = new RetryPolicy.Config().tap {
+    maxAttempts(5)
+    backoffExponential(200, 10_000, true)
+    onTimeouts(true)
+    on5xx(true)
+    onIoExceptions(true)
+}.build()
+
+def config = SecurityConfig.production("https://api.example.com")
+    .withOverrides([retryPolicy: retryPolicy])
+
+def client = new GroovyHttpClient(config)
+
+// This will retry up to 5 times on failures
+def response = client.getSync("/flaky-endpoint")
+----
+
+=== Circuit Breaker Pattern
+
+[source,groovy]
+----
+import org.softwood.http.SecurityConfig
+import org.softwood.http.GroovyHttpClient
+
+// Configure circuit breaker
+def config = SecurityConfig.production("https://api.example.com")
+    .withOverrides([
+        failureThreshold: 5,      // Open after 5 failures
+        resetTimeoutMs: 30_000    // Try recovery after 30 seconds
+    ])
+
+def client = new GroovyHttpClient(config)
+
+def fetchData() {
+    try {
+        return client.getSync("/data").json
+    } catch (GroovyHttpClient.CircuitOpenException e) {
+        println "Service unavailable - using cached data"
+        return cacheService.get("data")
+    } catch (Exception e) {
+        println "Request failed: ${e.message}"
+        return null
+    }
+}
+
+// Multiple calls - circuit breaker protects against cascading failures
+10.times {
+    def data = fetchData()
+    println "Data: ${data}"
+    Thread.sleep(1000)
+}
+----
+
+=== Graceful Degradation
+
+[source,groovy]
+----
+class ApiClient {
+    private final GroovyHttpClient primaryClient
+    private final GroovyHttpClient backupClient
+    private final CacheService cache
+    
+    ApiClient(String primaryUrl, String backupUrl) {
+        this.primaryClient = new GroovyHttpClient(primaryUrl)
+        this.backupClient = new GroovyHttpClient(backupUrl)
+        this.cache = new CacheService()
+    }
+    
+    def fetchUserData(String userId) {
+        // Try primary service
+        try {
+            def data = primaryClient.getSync("/users/${userId}").json
+            cache.put("user:${userId}", data)
+            return data
+        } catch (GroovyHttpClient.CircuitOpenException e) {
+            println "Primary circuit open - trying backup"
+        } catch (Exception e) {
+            println "Primary failed: ${e.message}"
+        }
+        
+        // Try backup service
+        try {
+            def data = backupClient.getSync("/users/${userId}").json
+            cache.put("user:${userId}", data)
+            return data
+        } catch (Exception e) {
+            println "Backup failed: ${e.message}"
+        }
+        
+        // Fall back to cache
+        def cached = cache.get("user:${userId}")
+        if (cached) {
+            println "Returning cached data"
+            return cached
+        }
+        
+        throw new RuntimeException("All data sources unavailable")
+    }
+}
+----
+
+== Async Operations
+
+=== Concurrent Requests
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient
+import java.util.concurrent.CompletableFuture
+
+def client = new GroovyHttpClient("https://api.example.com")
+
+// Launch multiple async requests
+def futures = (1..10).collect { id ->
+    client.get("/users/${id}").thenApply { response ->
+        response.json
+    }
+}
+
+// Wait for all to complete
+def allUsers = CompletableFuture.allOf(*futures).thenApply {
+    futures.collect { it.join() }
+}.get()
+
+println "Fetched ${allUsers.size()} users concurrently"
+----
+
+=== Async with Error Handling
+
+[source,groovy]
+----
+def client = new GroovyHttpClient("https://api.example.com")
+
+def userIds = [1, 2, 3, 999, 5]  // 999 doesn't exist
+
+def futures = userIds.collect { id ->
+    client.get("/users/${id}")
+        .thenApply { response ->
+            [success: true, data: response.json]
+        }
+        .exceptionally { error ->
+            [success: false, error: error.message, userId: id]
+        }
+}
+
+// Wait for all (including failures)
+def results = CompletableFuture.allOf(*futures).thenApply {
+    futures.collect { it.join() }
+}.get()
+
+// Process results
+def successful = results.findAll { it.success }
+def failed = results.findAll { !it.success }
+
+println "Successful: ${successful.size()}"
+println "Failed: ${failed.size()}"
+
+failed.each { println "Failed user ${it.userId}: ${it.error}" }
+----
+
+=== Parallel Processing
+
+[source,groovy]
+----
+def client = new GroovyHttpClient("https://api.example.com")
+
+def processUserBatch(List<Integer> userIds) {
+    def futures = userIds.collect { id ->
+        client.get("/users/${id}")
+            .thenApply { response -> response.json }
+            .thenApply { userData ->
+                // Process each user
+                processUser(userData)
+                return userData
+            }
+    }
+    
+    // Wait for batch to complete
+    return CompletableFuture.allOf(*futures)
+        .thenApply { futures.collect { it.join() } }
+        .get()
+}
+
+// Process in batches of 100
+def allUserIds = (1..1000).toList()
+def batchSize = 100
+
+allUserIds.collate(batchSize).each { batch ->
+    def processed = processUserBatch(batch)
+    println "Processed batch of ${processed.size()} users"
+}
+----
+
+== Testing Examples
+
+=== Testing with HttpClientTestDsl
+
+[source,groovy]
+----
+import org.softwood.http.HttpClientTestDsl
+import spock.lang.Specification
+
+class UserServiceSpec extends Specification {
+    
+    HttpClientTestDsl testDsl
+    UserService service
+    
+    def setup() {
+        testDsl = HttpClientTestDsl.create()
+        testDsl.start()
+        service = new UserService(testDsl.baseUrl)
+    }
+    
+    def cleanup() {
+        testDsl.stop()
+    }
+    
+    def "should fetch user by ID"() {
+        given: "a mock user endpoint"
+        testDsl.when("/users/123").respondWith {
+            status 200
+            json([
+                id: 123,
+                name: "Alice Smith",
+                email: "alice@example.com"
+            ])
+        }
+        
+        when: "fetching user"
+        def user = service.getUser(123)
+        
+        then: "user data is correct"
+        user.id == 123
+        user.name == "Alice Smith"
+        
+        and: "request was made with correct headers"
+        testDsl.verify("/users/123") {
+            wasCalled(1)
+            withMethod("GET")
+            withHeader("Authorization")
+        }
+    }
+    
+    def "should handle user not found"() {
+        given: "a 404 response"
+        testDsl.when("/users/999").respondWith {
+            status 404
+            json([error: "User not found"])
+        }
+        
+        when: "fetching non-existent user"
+        service.getUser(999)
+        
+        then: "exception is thrown"
+        thrown(UserNotFoundException)
+    }
+}
+----
+
+=== Testing Multipart Uploads
+
+[source,groovy]
+----
+import org.softwood.http.HttpClientTestDsl
+import spock.lang.Specification
+
+class DocumentServiceSpec extends Specification {
+    
+    HttpClientTestDsl testDsl
+    DocumentService service
+    
+    def setup() {
+        testDsl = HttpClientTestDsl.create()
+        testDsl.start()
+        service = new DocumentService(testDsl.baseUrl)
+    }
+    
+    def cleanup() {
+        testDsl.stop()
+    }
+    
+    def "should upload document"() {
+        given: "a mock upload endpoint"
+        testDsl.when("/documents").respondWith {
+            status 201
+            json([
+                document_id: "doc_123",
+                filename: "report.pdf",
+                size: 12345
+            ])
+        }
+        
+        and: "a document to upload"
+        def file = new File("test-data/report.pdf")
+        
+        when: "uploading document"
+        def result = service.uploadDocument(
+            file,
+            "Monthly Report",
+            "reports"
+        )
+        
+        then: "upload succeeds"
+        result.document_id == "doc_123"
+        
+        and: "request was made correctly"
+        testDsl.verify("/documents") {
+            wasCalled(1)
+            withMethod("POST")
+            withHeader("Content-Type")  // multipart/form-data
+            withHeader("Authorization")
+        }
+    }
+}
+----
+
+== Production Patterns
+
+=== Rate Limiting
+
+[source,groovy]
+----
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+
+class RateLimitedClient {
+    private final GroovyHttpClient client
+    private final Semaphore semaphore
+    private final long refillPeriodMs
+    
+    RateLimitedClient(String baseUrl, int maxConcurrent, long refillPeriodMs) {
+        this.client = new GroovyHttpClient(baseUrl)
+        this.semaphore = new Semaphore(maxConcurrent)
+        this.refillPeriodMs = refillPeriodMs
+        
+        // Background thread to refill permits
+        Thread.startVirtualThread {
+            while (true) {
+                Thread.sleep(refillPeriodMs)
+                semaphore.release(maxConcurrent - semaphore.availablePermits())
+            }
+        }
+    }
+    
+    def get(String path) {
+        semaphore.acquire()
+        try {
+            return client.getSync(path)
+        } finally {
+            // Don't release immediately - rate limit enforced by background thread
+        }
+    }
+}
+
+// Usage: Max 10 requests per second
+def rateLimited = new RateLimitedClient(
+    "https://api.example.com",
+    10,      // Max concurrent
+    1000     // Refill every 1 second
+)
+
+100.times { i ->
+    def response = rateLimited.get("/data/${i}")
+    println "Request ${i}: ${response.statusCode}"
+}
+----
+
+=### Logging and Metrics
+
+[source,groovy]
+----
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+
+class InstrumentedClient {
+    private final GroovyHttpClient client
+    private final AtomicInteger requestCount = new AtomicInteger(0)
+    private final AtomicInteger errorCount = new AtomicInteger(0)
+    private final AtomicLong totalLatency = new AtomicLong(0)
+    
+    InstrumentedClient(String baseUrl) {
+        this.client = new GroovyHttpClient(baseUrl)
+        
+        // Add logging interceptor
+        client.addInterceptor { ctx, next ->
+            def requestId = UUID.randomUUID().toString()
+            def start = System.currentTimeMillis()
+            
+            println "[${requestId}] → ${ctx.method} ${ctx.uri}"
+            requestCount.incrementAndGet()
+            
+            next.call(ctx).whenComplete { response, error ->
+                def elapsed = System.currentTimeMillis() - start
+                totalLatency.addAndGet(elapsed)
+                
+                if (error) {
+                    errorCount.incrementAndGet()
+                    println "[${requestId}] ✗ Failed after ${elapsed}ms: ${error.message}"
+                } else {
+                    println "[${requestId}] ✓ ${response.statusCode} in ${elapsed}ms"
+                }
+            }
+        }
+    }
+    
+    def getMetrics() {
+        def count = requestCount.get()
+        def errors = errorCount.get()
+        def avgLatency = count > 0 ? totalLatency.get() / count : 0
+        
+        return [
+            requests: count,
+            errors: errors,
+            success_rate: count > 0 ? ((count - errors) / count * 100) : 0,
+            avg_latency_ms: avgLatency
+        ]
+    }
+    
+    // Delegate methods
+    def getSync(String path, Closure config = null) {
+        client.getSync(path, config)
+    }
+}
+
+// Usage
+def instrumented = new InstrumentedClient("https://api.example.com")
+
+// Make requests
+100.times { instrumented.getSync("/data") }
+
+// View metrics
+def metrics = instrumented.getMetrics()
+println "Requests: ${metrics.requests}"
+println "Errors: ${metrics.errors}"
+println "Success rate: ${metrics.success_rate}%"
+println "Avg latency: ${metrics.avg_latency_ms}ms"
+----
+
+=== Configuration Management
+
+[source,groovy]
+----
+import org.softwood.http.SecurityConfig
+import org.softwood.http.GroovyHttpClient
+
+class ApiClientFactory {
+    
+    static GroovyHttpClient createForEnvironment(String env) {
+        switch (env.toLowerCase()) {
+            case 'development':
+                return createDevelopmentClient()
+            case 'staging':
+                return createStagingClient()
+            case 'production':
+                return createProductionClient()
+            default:
+                throw new IllegalArgumentException("Unknown environment: ${env}")
+        }
+    }
+    
+    private static GroovyHttpClient createDevelopmentClient() {
+        def config = SecurityConfig.testing("http://localhost:8080")
+            .withOverrides([
+                requestTimeout: Duration.ofSeconds(60),
+                failureThreshold: 100,  // Very tolerant
+                enableLogging: true
+            ])
+        new GroovyHttpClient(config)
+    }
+    
+    private static GroovyHttpClient createStagingClient() {
+        def config = SecurityConfig.production("https://staging-api.example.com")
+            .withOverrides([
+                requestTimeout: Duration.ofSeconds(30),
+                failureThreshold: 10,
+                resetTimeoutMs: 30_000
+            ])
+        new GroovyHttpClient(config)
+    }
+    
+    private static GroovyHttpClient createProductionClient() {
+        def retryPolicy = new RetryPolicy.Config().tap {
+            maxAttempts(3)
+            backoffExponential(200, 2000, true)
+            on5xx(true)
+        }.build()
+        
+        def config = SecurityConfig.production("https://api.example.com")
+            .withOverrides([
+                requestTimeout: Duration.ofSeconds(10),
+                connectTimeout: Duration.ofSeconds(5),
+                failureThreshold: 5,
+                resetTimeoutMs: 30_000,
+                retryPolicy: retryPolicy,
+                enforceHostnameVerification: true,
+                allowedTlsProtocols: ["TLSv1.3"],
+                enableMetrics: true
+            ])
+        new GroovyHttpClient(config)
+    }
+}
+
+// Usage
+def env = System.getenv("APP_ENV") ?: "development"
+def client = ApiClientFactory.createForEnvironment(env)
+----
+
+## Additional Examples in Test Suite
+
+The project includes comprehensive test suites demonstrating advanced usage:
+
+=== Client Tests
+
+Located in `src/test/groovy/org/softwood/http/clientTests/`:
+
+[horizontal]
+`GroovyHttpClientSpec.groovy`::
+Basic HTTP operations, headers, cookies, timeouts
+
+`GroovyHttpClientMultipartSpec.groovy`::
+Multipart uploads (DSL and API), file downloads
+
+`GroovyHttpClientHttp2Spec.groovy`::
+HTTP/2 features, concurrent requests
+
+`CircuitBreakerSpec.groovy`::
+Circuit breaker states, failure thresholds, recovery
+
+=== Testing Framework Tests
+
+Located in `src/test/groovy/org/softwood/http/testingFrameworkTests/`:
+
+[horizontal]
+`HttpClientTestDslSpec.groovy`::
+Mock endpoints, request verification, response building
+
+`HttpClientTestTraitSpec.groovy`::
+Spock trait integration, simplified testing
+
+=== Running the Tests
+
+```bash
+# Run all tests
+./gradlew test
+
+# Run specific test class
+./gradlew test --tests GroovyHttpClientSpec
+
+# Run tests with detailed output
+./gradlew test --info
+
+# Generate test report
+./gradlew test
+# Open build/reports/tests/test/index.html
+```
+
+=== Test Report
+
+After running tests, open the HTML report to see:
+
+* Detailed test results
+* Execution time per test
+* Pass/fail status
+* Code coverage (if configured)
+
+The test suite serves as living documentation - when in doubt, check the tests!
+
+## Next Steps
+
+* Review the <<api-reference,API Reference>> for complete method signatures
+* Check <<troubleshooting,Troubleshooting>> for common issues
+* Explore the test suite for more examples
+* Contribute your own examples via GitHub pull requests
+
+[TIP]
+====
+Have a unique use case? Share it with the community! Submit a pull request adding your example to this chapter.
+====

@@ -1,12 +1,11 @@
-package org.softwood.http
+package org.softwood.http.clientTests
+
+import org.softwood.http.GroovyHttpClient
+import org.softwood.http.SecurityConfig
 import spock.lang.Specification
 import spock.lang.Unroll
-import java.lang.reflect.Constructor
-import java.lang.reflect.Method
-import java.time.Duration
+
 import java.util.concurrent.CompletableFuture
-import java.util.concurrent.atomic.AtomicInteger
-import java.io.IOException
 
 class CircuitBreakerSpec extends Specification {
 

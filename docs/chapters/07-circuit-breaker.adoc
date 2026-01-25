@@ -1,0 +1,783 @@
+[[circuit-breaker]]
+= Circuit Breaker
+
+== Overview
+
+The circuit breaker pattern prevents cascading failures by temporarily blocking requests to failing services. GroovyHttpClient integrates a production-ready circuit breaker that automatically monitors request failures and protects your application from overwhelming unhealthy dependencies.
+
+[quote]
+____
+Circuit breakers are like electrical breakers in your home — they prevent damage by cutting power when things go wrong. In distributed systems, they prevent cascading failures by temporarily blocking calls to unhealthy services.
+____
+
+=== Key Features
+
+* ✅ Automatic failure detection and recovery
+* ✅ Three states: CLOSED, OPEN, HALF_OPEN
+* ✅ Configurable failure threshold
+* ✅ Automatic reset after timeout
+* ✅ Smart error classification (transient vs. permanent)
+* ✅ Half-open probing for recovery detection
+* ✅ Thread-safe operation
+* ✅ Integration with retry policies
+
+== Circuit Breaker States
+
+The circuit breaker operates in three distinct states:
+
+[plantuml, circuit-states, svg]
+----
+@startuml
+state CLOSED
+state OPEN
+state HALF_OPEN
+
+[*] --> CLOSED
+CLOSED --> OPEN : Failure threshold exceeded
+OPEN --> HALF_OPEN : Reset timeout expired
+HALF_OPEN --> CLOSED : Probe success
+HALF_OPEN --> OPEN : Probe failure
+@enduml
+----
+
+=== CLOSED State
+
+[horizontal]
+*Behavior*:: All requests pass through normally
+*Monitoring*:: Failure count increments on errors
+*Transition*:: Opens when failure count reaches threshold
+*Purpose*:: Normal operation mode
+
+[source,groovy]
+----
+// Circuit is closed - all requests proceed
+def response1 = client.getSync("/api/data")  // ✅ Executes
+def response2 = client.getSync("/api/users") // ✅ Executes
+def response3 = client.getSync("/api/posts") // ✅ Executes
+----
+
+=== OPEN State
+
+[horizontal]
+*Behavior*:: All requests fail immediately with `CircuitOpenException`
+*Monitoring*:: Tracks time since circuit opened
+*Transition*:: Moves to HALF_OPEN after reset timeout
+*Purpose*:: Protect failing service from additional load
+
+[source,groovy]
+----
+// Circuit is open - requests fail fast
+try {
+    def response = client.getSync("/api/data")
+} catch (GroovyHttpClient.CircuitOpenException e) {
+    println "Circuit breaker is open - service unavailable"
+    // Handle gracefully: return cached data, use fallback, etc.
+}
+----
+
+[NOTE]
+====
+The OPEN state prevents wasting resources on requests that will likely fail. Failing fast allows your application to:
+
+* Show error messages immediately
+* Return cached data
+* Use fallback services
+* Avoid thread pool exhaustion
+====
+
+=== HALF_OPEN State
+
+[horizontal]
+*Behavior*:: Single "probe" request allowed through
+*Monitoring*:: Probe result determines next state
+*Transition*:: CLOSED on success, OPEN on failure
+*Purpose*:: Test if service has recovered
+
+[source,groovy]
+----
+// After reset timeout expires, circuit enters HALF_OPEN
+// Next request acts as a probe
+
+def response = client.getSync("/api/health")  // Probe request
+
+// If successful → Circuit goes to CLOSED
+// If fails → Circuit goes back to OPEN
+----
+
+[IMPORTANT]
+====
+Only ONE probe request is allowed in HALF_OPEN state. Subsequent requests while the probe is in-flight will fail with `CircuitOpenException`.
+====
+
+== Configuration
+
+=== Via SecurityConfig
+
+Configure circuit breaker when creating the client:
+
+[source,groovy]
+----
+import org.softwood.http.SecurityConfig
+import org.softwood.http.GroovyHttpClient
+
+def config = SecurityConfig.production("https://api.example.com")
+    .withOverrides([
+        failureThreshold: 5,      // Open after 5 failures
+        resetTimeoutMs: 30_000    // Try recovery after 30 seconds
+    ])
+
+def client = new GroovyHttpClient(config)
+----
+
+=== Via Builder
+
+[source,groovy]
+----
+def client = GroovyHttpClient.builder("https://api.example.com")
+    .failureThreshold(10)
+    .resetTimeoutMs(60_000)  // 1 minute
+    .build()
+----
+
+=== Configuration Parameters
+
+[cols="2,3,2"]
+|===
+|Parameter |Description |Default
+
+|`failureThreshold`
+|Number of failures before opening circuit
+|5
+
+|`resetTimeoutMs`
+|Milliseconds before attempting recovery (HALF_OPEN)
+|30,000 (30 seconds)
+|===
+
+== Failure Classification
+
+The circuit breaker only counts *transient* or *server* errors. Not all errors trigger the circuit breaker.
+
+=== Counted Failures (Circuit Breaker Opens)
+
+[source,groovy]
+----
+// Network errors (transient)
+✅ IOException
+✅ HttpTimeoutException
+✅ ConnectException
+
+// Server errors (5xx)
+✅ 500 Internal Server Error
+✅ 502 Bad Gateway
+✅ 503 Service Unavailable
+✅ 504 Gateway Timeout
+----
+
+=== Ignored Failures (Circuit Stays Closed)
+
+[source,groovy]
+----
+// Client errors (4xx) - These are not service health issues
+❌ 400 Bad Request
+❌ 401 Unauthorized
+❌ 403 Forbidden
+❌ 404 Not Found
+❌ 422 Unprocessable Entity
+
+// Application errors - These are not transient
+❌ IllegalArgumentException
+❌ ContentParseException
+❌ Custom business logic exceptions
+----
+
+[NOTE]
+====
+This intelligent classification prevents the circuit breaker from opening due to client-side errors (bad requests, invalid auth) which wouldn't be fixed by waiting.
+====
+
+== Usage Patterns
+
+=== Automatic Operation
+
+The circuit breaker operates automatically — no explicit code needed:
+
+[source,groovy]
+----
+// Create client with circuit breaker
+def config = SecurityConfig.production("https://api.example.com")
+    .withOverrides([failureThreshold: 3, resetTimeoutMs: 10_000])
+
+def client = new GroovyHttpClient(config)
+
+// Make requests normally
+try {
+    def response = client.getSync("/data")
+    println "Success: ${response.body}"
+} catch (GroovyHttpClient.CircuitOpenException e) {
+    // Circuit is open - handle gracefully
+    println "Service temporarily unavailable"
+} catch (GroovyHttpClient.HttpResponseException e) {
+    // Service returned error
+    println "HTTP error: ${e.statusCode}"
+} catch (IOException e) {
+    // Network error (increments failure count)
+    println "Network failure"
+}
+----
+
+=== Graceful Degradation
+
+Provide fallback behavior when circuit is open:
+
+[source,groovy]
+----
+def fetchUserData(String userId) {
+    try {
+        return client.getSync("/users/${userId}").json
+    } catch (GroovyHttpClient.CircuitOpenException e) {
+        log.warn("Circuit breaker open - returning cached data")
+        return cacheService.get("user:${userId}")
+    }
+}
+----
+
+=== Health Checks
+
+Implement a health check endpoint that respects the circuit breaker:
+
+[source,groovy]
+----
+def checkServiceHealth() {
+    try {
+        def response = client.getSync("/health")
+        return [
+            status: "healthy",
+            circuitState: "CLOSED"
+        ]
+    } catch (GroovyHttpClient.CircuitOpenException e) {
+        return [
+            status: "degraded",
+            circuitState: "OPEN",
+            message: "Downstream service unavailable"
+        ]
+    }
+}
+----
+
+=== Multiple Backends
+
+Use separate circuit breakers for independent services:
+
+[source,groovy]
+----
+// Primary service
+def primaryClient = new GroovyHttpClient(
+    SecurityConfig.production("https://primary-api.com")
+        .withOverrides([failureThreshold: 5, resetTimeoutMs: 30_000])
+)
+
+// Backup service (more tolerance)
+def backupClient = new GroovyHttpClient(
+    SecurityConfig.production("https://backup-api.com")
+        .withOverrides([failureThreshold: 10, resetTimeoutMs: 60_000])
+)
+
+def fetchData() {
+    try {
+        return primaryClient.getSync("/data").json
+    } catch (GroovyHttpClient.CircuitOpenException e) {
+        log.info("Primary circuit open - trying backup")
+        return backupClient.getSync("/data").json
+    }
+}
+----
+
+== Integration with Retries
+
+Circuit breakers work seamlessly with retry policies:
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient.RetryPolicy
+
+def retryPolicy = new RetryPolicy.Config().tap {
+    maxAttempts(3)
+    backoffExponential(200, 2000, true)
+    on5xx(true)
+    onTimeouts(true)
+}.build()
+
+def config = SecurityConfig.production("https://api.example.com")
+    .withOverrides([
+        retryPolicy: retryPolicy,
+        failureThreshold: 5,
+        resetTimeoutMs: 30_000
+    ])
+
+def client = new GroovyHttpClient(config)
+----
+
+[IMPORTANT]
+====
+Execution flow with retries + circuit breaker:
+
+1. Request attempt 1 → Fails (network error)
+2. Retry after backoff → Fails (5xx error)
+3. Retry after backoff → Fails (timeout)
+4. All attempts exhausted → Circuit breaker counts as 1 failure
+5. After 5 such failed request sequences → Circuit opens
+
+The circuit breaker counts *request sequences*, not individual retry attempts.
+====
+
+== Advanced Patterns
+
+=== Manual State Inspection
+
+Access circuit breaker state programmatically:
+
+[source,groovy]
+----
+// Access the circuit breaker
+def breaker = client.circuitBreaker
+
+// Check state
+switch (breaker.state) {
+    case GroovyHttpClient.State.CLOSED:
+        println "Service healthy"
+        break
+    case GroovyHttpClient.State.OPEN:
+        println "Service unavailable"
+        break
+    case GroovyHttpClient.State.HALF_OPEN:
+        println "Service recovery in progress"
+        break
+}
+
+// Get metrics
+println "Failure count: ${breaker.failureCount}"
+println "Failure threshold: ${breaker.failureThreshold}"
+println "Reset timeout: ${breaker.resetTimeoutMs}ms"
+----
+
+[WARNING]
+====
+The circuit breaker is designed for automatic operation. Manual state inspection should only be used for:
+
+* Monitoring/metrics
+* Health check endpoints
+* Testing
+
+Do NOT manually manipulate circuit breaker state in production code.
+====
+
+=== Metrics Collection
+
+Track circuit breaker behavior:
+
+[source,groovy]
+----
+import java.util.concurrent.atomic.AtomicLong
+
+class CircuitBreakerMetrics {
+    final AtomicLong openCount = new AtomicLong(0)
+    final AtomicLong halfOpenCount = new AtomicLong(0)
+    final AtomicLong successfulProbes = new AtomicLong(0)
+    final AtomicLong failedProbes = new AtomicLong(0)
+    
+    void recordStateChange(state) {
+        switch (state) {
+            case GroovyHttpClient.State.OPEN:
+                openCount.incrementAndGet()
+                break
+            case GroovyHttpClient.State.HALF_OPEN:
+                halfOpenCount.incrementAndGet()
+                break
+        }
+    }
+}
+
+// Monitor via interceptor
+def metrics = new CircuitBreakerMetrics()
+
+client.addInterceptor { ctx, next ->
+    def breaker = client.circuitBreaker
+    def initialState = breaker.state
+    
+    next.call(ctx).whenComplete { response, error ->
+        if (breaker.state != initialState) {
+            metrics.recordStateChange(breaker.state)
+        }
+        
+        if (initialState == GroovyHttpClient.State.HALF_OPEN) {
+            if (error == null) {
+                metrics.successfulProbes.incrementAndGet()
+            } else {
+                metrics.failedProbes.incrementAndGet()
+            }
+        }
+    }
+}
+----
+
+=== Circuit Breaker Per Endpoint
+
+For fine-grained control, create separate clients per critical endpoint:
+
+[source,groovy]
+----
+class ApiClients {
+    private final String baseUrl
+    
+    // Strict circuit breaker for critical endpoint
+    final GroovyHttpClient criticalClient
+    
+    // Lenient circuit breaker for non-critical
+    final GroovyHttpClient normalClient
+    
+    ApiClients(String baseUrl) {
+        this.baseUrl = baseUrl
+        
+        this.criticalClient = new GroovyHttpClient(
+            SecurityConfig.production(baseUrl)
+                .withOverrides([failureThreshold: 2, resetTimeoutMs: 10_000])
+        )
+        
+        this.normalClient = new GroovyHttpClient(
+            SecurityConfig.production(baseUrl)
+                .withOverrides([failureThreshold: 10, resetTimeoutMs: 60_000])
+        )
+    }
+    
+    def placeCriticalOrder(orderData) {
+        criticalClient.postSync("/orders", null) { json(orderData) }
+    }
+    
+    def fetchRecommendations() {
+        normalClient.getSync("/recommendations")
+    }
+}
+----
+
+== Testing Circuit Breakers
+
+=== With Spock
+
+[source,groovy]
+----
+import spock.lang.Specification
+import org.softwood.http.GroovyHttpClient
+import org.softwood.http.SecurityConfig
+
+class CircuitBreakerSpec extends Specification {
+    
+    def "circuit breaker opens after threshold failures"() {
+        given: "a client with low threshold"
+        def config = SecurityConfig.testing("http://failing-service.com")
+            .withOverrides([
+                failureThreshold: 3,
+                resetTimeoutMs: 60_000
+            ])
+        def client = new GroovyHttpClient(config)
+        
+        and: "a server that returns 503"
+        server.when("/data").respondWithStatus(503)
+        
+        when: "making requests until threshold"
+        3.times {
+            try {
+                client.getSync("/data")
+            } catch (ignored) {}
+        }
+        
+        then: "circuit breaker opens"
+        def error = null
+        try {
+            client.getSync("/data")
+        } catch (GroovyHttpClient.CircuitOpenException e) {
+            error = e
+        }
+        error != null
+        error.message.contains("Circuit")
+    }
+    
+    def "circuit breaker closes after reset timeout"() {
+        given: "a client with short reset timeout"
+        def config = SecurityConfig.testing("http://test-service.com")
+            .withOverrides([
+                failureThreshold: 2,
+                resetTimeoutMs: 100  // 100ms
+            ])
+        def client = new GroovyHttpClient(config)
+        
+        when: "opening the circuit"
+        server.when("/data").respondWithStatus(503)
+        2.times {
+            try { client.getSync("/data") } catch (ignored) {}
+        }
+        
+        then: "circuit is open"
+        def ex1 = null
+        try {
+            client.getSync("/data")
+        } catch (GroovyHttpClient.CircuitOpenException e) {
+            ex1 = e
+        }
+        ex1 != null
+        
+        when: "waiting for reset timeout"
+        Thread.sleep(150)
+        server.when("/data").respondWithStatus(200)
+        
+        and: "making a probe request"
+        def response = client.getSync("/data")
+        
+        then: "probe succeeds and circuit closes"
+        response.statusCode == 200
+    }
+}
+----
+
+=== Simulating Failures
+
+[source,groovy]
+----
+def testDsl = HttpClientTestDsl.create()
+testDsl.start()
+
+// Simulate failing endpoint
+testDsl.when("/flaky")
+    .respondWith {
+        status 503
+        text "Service Unavailable"
+    }
+
+def client = new GroovyHttpClient(testDsl.baseUrl)
+    .tap {
+        config = SecurityConfig.testing(testDsl.baseUrl)
+            .withOverrides([failureThreshold: 3, resetTimeoutMs: 10_000])
+    }
+
+// Trigger circuit breaker
+3.times {
+    try { client.getSync("/flaky") } catch (ignored) {}
+}
+
+// Verify circuit is open
+try {
+    client.getSync("/flaky")
+    assert false, "Should have thrown CircuitOpenException"
+} catch (GroovyHttpClient.CircuitOpenException e) {
+    println "Circuit breaker working correctly"
+}
+
+testDsl.stop()
+----
+
+== Best Practices
+
+=== Choose Appropriate Thresholds
+
+[horizontal]
+*Low Threshold (2-3)*:: Critical services, fast failure detection
+*Medium Threshold (5-10)*:: Normal services, balance resilience and tolerance
+*High Threshold (10-20)*:: Non-critical services, maximum tolerance
+
+[source,groovy]
+----
+// ✅ Critical payment service
+def paymentClient = new GroovyHttpClient(
+    SecurityConfig.production("https://payment-api.com")
+        .withOverrides([failureThreshold: 2, resetTimeoutMs: 10_000])
+)
+
+// ✅ Best-effort analytics service
+def analyticsClient = new GroovyHttpClient(
+    SecurityConfig.production("https://analytics-api.com")
+        .withOverrides([failureThreshold: 20, resetTimeoutMs: 120_000])
+)
+----
+
+=== Scale Reset Timeout with Recovery Time
+
+[horizontal]
+*Fast Recovery (10-30s)*:: Stateless services, quick deployments
+*Medium Recovery (30-60s)*:: Typical microservices
+*Slow Recovery (60-300s)*:: Databases, cache warm-up required
+
+[source,groovy]
+----
+// ✅ Stateless API
+resetTimeoutMs: 10_000  // 10 seconds
+
+// ✅ Service with cache warm-up
+resetTimeoutMs: 60_000  // 1 minute
+
+// ✅ Database recovering from backup
+resetTimeoutMs: 300_000 // 5 minutes
+----
+
+=== Combine with Retries Carefully
+
+[source,groovy]
+----
+// ✅ Good: Few retries, moderate circuit breaker
+def retryPolicy = new RetryPolicy.Config().tap {
+    maxAttempts(3)
+    backoffExponential(200, 1000, true)
+}.build()
+
+def config = SecurityConfig.production(url)
+    .withOverrides([
+        retryPolicy: retryPolicy,
+        failureThreshold: 5,
+        resetTimeoutMs: 30_000
+    ])
+
+// ❌ Bad: Many retries + strict circuit breaker
+// Circuit will open too quickly
+maxAttempts(10)  // ← Too many retries
+failureThreshold: 2  // ← Too strict threshold
+----
+
+=== Always Handle CircuitOpenException
+
+[source,groovy]
+----
+// ✅ Proper error handling
+try {
+    return client.getSync("/data").json
+} catch (GroovyHttpClient.CircuitOpenException e) {
+    log.warn("Circuit open - using fallback")
+    return fallbackData
+} catch (Exception e) {
+    log.error("Request failed", e)
+    throw e
+}
+
+// ❌ No circuit breaker handling
+try {
+    return client.getSync("/data").json
+} catch (Exception e) {
+    // Circuit open exception not handled specially
+    throw e
+}
+----
+
+=== Monitor Circuit Breaker State
+
+[source,groovy]
+----
+// ✅ Log state transitions
+client.addInterceptor { ctx, next ->
+    def initialState = client.circuitBreaker.state
+    
+    next.call(ctx).whenComplete { response, error ->
+        def newState = client.circuitBreaker.state
+        if (initialState != newState) {
+            log.warn("Circuit breaker state changed: ${initialState} → ${newState}")
+        }
+    }
+}
+----
+
+### Don't Disable for Testing
+
+[source,groovy]
+----
+// ❌ Bad: Disabled circuit breaker
+def config = SecurityConfig.testing(url)
+    .withOverrides([failureThreshold: Integer.MAX_VALUE])
+
+// ✅ Good: Use realistic thresholds even in tests
+def config = SecurityConfig.testing(url)
+    .withOverrides([failureThreshold: 5, resetTimeoutMs: 1000])
+----
+
+## Troubleshooting
+
+=== Circuit Opens Too Quickly
+
+[source,groovy]
+----
+// Problem: Circuit opens after just 2 failures
+failureThreshold: 2
+
+// Solution: Increase threshold
+failureThreshold: 10
+
+// Or: Add retries to absorb transient failures
+def retryPolicy = new RetryPolicy.Config().tap {
+    maxAttempts(3)
+    backoffExponential(200, 1000, true)
+}.build()
+----
+
+=== Circuit Never Opens
+
+[source,groovy]
+----
+// Problem: Only non-transient errors occurring
+// 404 Not Found → Not counted
+// 401 Unauthorized → Not counted
+
+// Solution: Check that server is returning 5xx or
+// ensure network/timeout errors are occurring
+
+// Verify error types:
+client.addInterceptor { ctx, next ->
+    next.call(ctx).exceptionally { error ->
+        println "Error type: ${error.class.name}"
+        println "Status code: ${error instanceof HttpResponseException ? error.statusCode : 'N/A'}"
+        throw error
+    }
+}
+----
+
+=== Circuit Stays Open Forever
+
+[source,groovy]
+----
+// Problem: Reset timeout too long
+resetTimeoutMs: 3_600_000  // 1 hour
+
+// Solution: Use reasonable timeout
+resetTimeoutMs: 30_000  // 30 seconds
+
+// Or: Check that service is actually recovering
+----
+
+=== Probe Request Fails
+
+[source,groovy]
+----
+// Circuit moves OPEN → HALF_OPEN → OPEN (immediately)
+
+// Possible causes:
+// 1. Service hasn't fully recovered
+// 2. Probe endpoint is unhealthy
+// 3. Reset timeout too short
+
+// Solutions:
+// 1. Increase reset timeout to allow more recovery time
+// 2. Use a dedicated health endpoint for probes
+// 3. Investigate service recovery process
+----
+
+## Performance Impact
+
+[horizontal]
+*Memory*:: Minimal (single counter + timestamps per client)
+*CPU*:: Negligible (simple integer comparisons)
+*Latency*:: ~1μs overhead per request
+*Concurrency*:: Thread-safe with atomic operations
+
+## Next Steps
+
+Related topics for robust HTTP clients:
+
+* <<groovy-http-client,Request Configuration>> — Timeouts and retries
+* <<multipart-uploads,Multipart Uploads>> — File upload resilience
+* <<testing-dsl,HttpClientTestDsl>> — Test circuit breaker behavior
+* <<examples,Real-World Examples>> — Production patterns

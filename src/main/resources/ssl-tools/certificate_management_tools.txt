@@ -1,0 +1,133 @@
+SSL/TLS Certificate Management Tools
+====================================
+
+Quick reference for SSL certificate and keystore management scripts.
+
+SCRIPTS
+-------
+
+create-keystore.sh / .bat
+    Generate PKCS12 keystores for development or production use
+
+import-certificate.sh / .bat
+    Import CA certificates into PKCS12 truststore
+
+convert-pem-to-p12.sh / .bat
+    Convert PEM format certificates to PKCS12 keystore
+
+
+QUICK EXAMPLES
+--------------
+
+Development Keystore (Self-Signed)
+-----------------------------------
+Linux/Mac:
+    ./create-keystore.sh --type development --output dev-keystore.p12 \
+        --password changeit --hostname localhost
+
+Windows:
+    create-keystore.bat --type development --output dev-keystore.p12 ^
+        --password changeit --hostname localhost
+
+
+Import CA Certificate
+---------------------
+Linux/Mac:
+    ./import-certificate.sh --cert company-ca.crt \
+        --truststore company-truststore.p12 --password trustpass
+
+Windows:
+    import-certificate.bat --cert company-ca.crt ^
+        --truststore company-truststore.p12 --password trustpass
+
+
+Convert PEM to PKCS12 (Client Certificate)
+-------------------------------------------
+Linux/Mac:
+    ./convert-pem-to-p12.sh --input client-cert.pem \
+        --key client-key.pem --output client-keystore.p12 --password secret
+
+Windows:
+    convert-pem-to-p12.bat --input client-cert.pem ^
+        --key client-key.pem --output client-keystore.p12 --password secret
+
+
+COMMON COMMANDS
+---------------
+
+List keystore contents:
+    keytool -list -v -keystore keystore.p12 -storepass password
+
+Export certificate:
+    keytool -exportcert -keystore keystore.p12 -alias cert \
+        -file exported.crt -storepass password
+
+Test SSL connection:
+    openssl s_client -connect api.example.com:443 -showcerts
+
+View certificate details:
+    openssl x509 -in certificate.crt -text -noout
+
+
+GROOVYHTTPCLIENT USAGE
+----------------------
+
+Load Truststore:
+    def trustStore = java.security.KeyStore.getInstance("PKCS12")
+    new FileInputStream("truststore.p12").withCloseable { fis ->
+        trustStore.load(fis, "password".toCharArray())
+    }
+
+    def config = SecurityConfig.production("https://api.example.com")
+        .withOverrides([trustStore: trustStore])
+
+Load Keystore (mTLS):
+    def keyStore = java.security.KeyStore.getInstance("PKCS12")
+    new FileInputStream("client-keystore.p12").withCloseable { fis ->
+        keyStore.load(fis, "password".toCharArray())
+    }
+
+    def kmf = KeyManagerFactory.getInstance(
+        KeyManagerFactory.getDefaultAlgorithm()
+    )
+    kmf.init(keyStore, "password".toCharArray())
+
+    def config = SecurityConfig.production("https://api.example.com")
+        .withOverrides([keyManagers: kmf.getKeyManagers()])
+
+
+SECURITY NOTES
+--------------
+
+1. Store passwords in environment variables or secrets managers
+2. Never commit keystores/truststores to version control
+3. Set restrictive file permissions (chmod 600 on Linux/Mac)
+4. Use PKCS12 format (.p12) - it's the modern standard
+5. Rotate certificates before expiration
+
+
+REQUIREMENTS
+------------
+
+- Java (for keytool)
+- OpenSSL (for PEM conversion)
+
+Linux/Mac: Usually pre-installed
+Windows: Download OpenSSL from https://slproweb.com/products/Win32OpenSSL.html
+
+
+FULL DOCUMENTATION
+------------------
+
+See SSL_CERTIFICATE_GUIDE.md for complete documentation including:
+- Production scenarios (mTLS, corporate CA, cloud services)
+- SecurityConfig integration examples
+- Troubleshooting common issues
+- Best practices
+
+
+SUPPORT
+-------
+
+GitHub: https://github.com/softwood/groovy-HttpClient
+Email: will.woodman.softwood@outlook.com

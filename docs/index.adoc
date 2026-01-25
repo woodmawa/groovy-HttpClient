@@ -1,0 +1,50 @@
+= Groovy HTTP Client Documentation
+:doctype: book
+:toc: left
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: rouge
+:version: 1.5.0
+:author: Will Woodman
+:email: will.woodman@softwood.com
+
+include::attributes.adoc[]
+
+[preface]
+== Preface
+
+A modern, production-ready HTTP client built on Java 25 virtual threads with comprehensive Groovy DSL support, and testing framework support.
+
+include::chapters/01-introduction.adoc[]
+
+include::chapters/02-architecture.adoc[]
+
+include::chapters/03-security-config.adoc[]
+
+include::chapters/04-url-builder.adoc[]
+
+include::chapters/05-groovy-http-client.adoc[]
+
+include::chapters/06-multipart-uploads.adoc[]
+
+include::chapters/07-circuit-breaker.adoc[]
+
+include::chapters/08-testing-mock-server.adoc[]
+
+include::chapters/09-testing-dsl.adoc[]
+
+include::chapters/10-testing-trait.adoc[]
+
+include::chapters/11-examples.adoc[]
+
+[appendix]
+== API Reference
+...
+
+[appendix]
+== Troubleshooting
+...
+
+[index]
+== Index

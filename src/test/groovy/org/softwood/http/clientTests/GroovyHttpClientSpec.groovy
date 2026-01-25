@@ -1,5 +1,6 @@
-package org.softwood.http
+package org.softwood.http.clientTests
 
+import org.softwood.http.GroovyHttpClient
 import spock.lang.Specification
 import org.softwood.test.MockHttpServer
 import org.softwood.http.SecurityConfig

@@ -1,0 +1,902 @@
+[[testing-trait]]
+= HttpClientTestTrait
+
+== Overview
+
+`HttpClientTestTrait` is a Groovy trait that seamlessly integrates `HttpClientTestDsl` into Spock specifications. It eliminates boilerplate setup code, provides convenient helper methods, and manages the test server lifecycle automatically.
+
+[quote]
+____
+Mix in testing superpowers. One trait, zero boilerplate.
+____
+
+=== Key Benefits
+
+[horizontal]
+*Zero Boilerplate*:: No manual server creation or lifecycle management
+*Auto Cleanup*:: Server automatically stopped after tests
+*Convenient Helpers*:: Shorthand methods for common operations
+*Shared Server*:: Single server instance for all tests (performance)
+*Familiar API*:: Exposes `HttpClientTestDsl` methods directly
+*Type Safe*:: Full IDE autocomplete and compile-time checking
+
+## Quick Start
+
+=== Basic Usage
+
+[source,groovy]
+----
+import org.softwood.http.HttpClientTestTrait
+import spock.lang.Specification
+
+class UserApiSpec extends Specification implements HttpClientTestTrait {
+    
+    def "should fetch user by ID"() {
+        given: "a mocked user endpoint"
+        mockEndpoint("/users/123") {
+            status 200
+            json([id: 123, name: "Alice"])
+        }
+        
+        when: "fetching user"
+        def client = createTestClient()
+        def response = client.getSync("/users/123")
+        
+        then: "user data is returned"
+        response.statusCode == 200
+        response.json.name == "Alice"
+        
+        and: "request was made"
+        verifyRequest("/users/123").wasCalled()
+    }
+}
+----
+
+That's it! No setup/cleanup, no manual server management.
+
+=== What the Trait Provides
+
+The trait automatically:
+
+* Creates `HttpClientTestDsl` instance
+* Starts the test server
+* Manages server lifecycle
+* Provides helper methods
+* Cleans up after tests
+
+## Trait Methods
+
+=== Server Access
+
+*Get Test Server*:
+[source,groovy]
+----
+// Access underlying HttpClientTestDsl
+def testServer = this.testServer
+println "Server running on: ${testServer.baseUrl}"
+----
+
+*Get Base URL*:
+[source,groovy]
+----
+def url = testServerUrl
+// e.g., "http://localhost:54321"
+----
+
+=== Client Creation
+
+*Create Test Client*:
+[source,groovy]
+----
+// Default testing config
+def client = createTestClient()
+
+// With custom config
+def client = createTestClient {
+    requestTimeout = Duration.ofSeconds(60)
+    enableLogging = true
+    failureThreshold = 3
+}
+----
+
+=== Endpoint Mocking
+
+*Simple Endpoint*:
+[source,groovy]
+----
+// Returns MockEndpoint for chaining
+def endpoint = mockEndpoint("/api/data")
+
+endpoint.respondWith {
+    status 200
+    json([data: "value"])
+}
+----
+
+*With Response Configuration*:
+[source,groovy]
+----
+mockEndpoint("/users") {
+    status 200
+    json([
+        users: [[id: 1], [id: 2]]
+    ])
+}
+----
+
+This is equivalent to:
+
+[source,groovy]
+----
+testServer.when("/users").respondWith {
+    status 200
+    json([users: [[id: 1], [id: 2]]])
+}
+----
+
+=== Request Verification
+
+*Verify Requests*:
+[source,groovy]
+----
+verifyRequest("/api/data")
+    .wasCalled()
+    .withMethod("GET")
+    .withHeader("Accept", "application/json")
+----
+
+*Get Recorded Requests*:
+[source,groovy]
+----
+// All requests
+def allRequests = recordedRequests
+
+// Requests for specific path
+def userRequests = getRecordedRequests("/users")
+----
+
+=== Server Management
+
+*Reset Server State*:
+[source,groovy]
+----
+// Clear endpoints and request history
+resetTestServer()
+----
+
+*Manual Server Cleanup* (optional):
+[source,groovy]
+----
+// Called automatically in cleanupSpec
+// Only call manually if needed
+stopTestServer()
+----
+
+## Complete Example
+
+[source,groovy]
+----
+import org.softwood.http.HttpClientTestTrait
+import org.softwood.http.GroovyHttpClient
+import spock.lang.Specification
+
+class UserServiceSpec extends Specification implements HttpClientTestTrait {
+    
+    UserService userService
+    
+    def setup() {
+        def client = createTestClient()
+        userService = new UserService(client)
+    }
+    
+    def cleanup() {
+        resetTestServer()
+    }
+    
+    def "should list all users"() {
+        given: "users endpoint returns list"
+        mockEndpoint("/users") {
+            status 200
+            json([
+                users: [
+                    [id: 1, name: "Alice", email: "alice@example.com"],
+                    [id: 2, name: "Bob", email: "bob@example.com"]
+                ],
+                total: 2
+            ])
+        }
+        
+        when: "fetching users"
+        def users = userService.listUsers()
+        
+        then: "users are returned"
+        users.size() == 2
+        users[0].name == "Alice"
+        users[1].name == "Bob"
+        
+        and: "correct request was made"
+        verifyRequest("/users")
+            .wasCalled()
+            .withMethod("GET")
+    }
+    
+    def "should get user by ID"() {
+        given: "user endpoint returns data"
+        mockEndpoint("/users/123") {
+            status 200
+            json([
+                id: 123,
+                name: "Alice",
+                email: "alice@example.com"
+            ])
+        }
+        
+        when: "fetching user"
+        def user = userService.getUser(123)
+        
+        then: "user data is correct"
+        user.id == 123
+        user.name == "Alice"
+        user.email == "alice@example.com"
+    }
+    
+    def "should create new user"() {
+        given: "create endpoint returns created user"
+        mockEndpoint("/users") {
+            status 201
+            json([
+                id: 456,
+                name: "Charlie",
+                email: "charlie@example.com"
+            ])
+            header "Location", "/users/456"
+        }
+        
+        when: "creating user"
+        def user = userService.createUser("Charlie", "charlie@example.com")
+        
+        then: "user is created"
+        user.id == 456
+        user.name == "Charlie"
+        
+        and: "correct request was made"
+        verifyRequest("/users")
+            .wasCalled()
+            .withMethod("POST")
+            .withHeader("Content-Type", "application/json")
+            .withBodyContaining("Charlie")
+    }
+    
+    def "should handle user not found"() {
+        given: "endpoint returns 404"
+        mockEndpoint("/users/999") {
+            status 404
+            json([error: "User not found"])
+        }
+        
+        when: "fetching non-existent user"
+        userService.getUser(999)
+        
+        then: "throws exception"
+        thrown(UserNotFoundException)
+    }
+    
+    def "should handle server errors"() {
+        given: "endpoint returns 500"
+        mockEndpoint("/users") {
+            status 500
+            json([error: "Internal server error"])
+        }
+        
+        when: "fetching users"
+        userService.listUsers()
+        
+        then: "throws exception"
+        thrown(ServerException)
+        
+        and: "request was attempted"
+        verifyRequest("/users").wasCalled()
+    }
+}
+
+// Example service class
+class UserService {
+    private final GroovyHttpClient client
+    
+    UserService(GroovyHttpClient client) {
+        this.client = client
+    }
+    
+    List<User> listUsers() {
+        def response = client.getSync("/users")
+        response.json.users.collect { new User(it) }
+    }
+    
+    User getUser(int id) {
+        try {
+            def response = client.getSync("/users/${id}")
+            new User(response.json)
+        } catch (HttpResponseException e) {
+            if (e.statusCode == 404) {
+                throw new UserNotFoundException("User ${id} not found")
+            }
+            throw e
+        }
+    }
+    
+    User createUser(String name, String email) {
+        def response = client.postSync("/users", null) {
+            json([name: name, email: email])
+        }
+        new User(response.json)
+    }
+}
+
+class User {
+    int id
+    String name
+    String email
+    
+    User(Map data) {
+        this.id = data.id as int
+        this.name = data.name
+        this.email = data.email
+    }
+}
+
+class UserNotFoundException extends RuntimeException {
+    UserNotFoundException(String message) {
+        super(message)
+    }
+}
+
+class ServerException extends RuntimeException {
+    ServerException(String message) {
+        super(message)
+    }
+}
+----
+
+## Advanced Usage
+
+=== Multiple Endpoints
+
+[source,groovy]
+----
+def "should fetch user and their posts"() {
+    given: "user endpoint"
+    mockEndpoint("/users/1") {
+        json([id: 1, name: "Alice"])
+    }
+    
+    and: "posts endpoint"
+    mockEndpoint("/users/1/posts") {
+        json([
+            posts: [
+                [id: 1, title: "First Post"],
+                [id: 2, title: "Second Post"]
+            ]
+        ])
+    }
+    
+    when: "fetching user and posts"
+    def client = createTestClient()
+    def user = client.getSync("/users/1").json
+    def posts = client.getSync("/users/1/posts").json.posts
+    
+    then:
+    user.name == "Alice"
+    posts.size() == 2
+    
+    and: "both requests were made"
+    verifyRequest("/users/1").wasCalled()
+    verifyRequest("/users/1/posts").wasCalled()
+}
+----
+
+=== Error Scenarios
+
+[source,groovy]
+----
+def "should retry on server errors"() {
+    given: "endpoint that returns 500"
+    mockEndpoint("/flaky") {
+        status 500
+        body "Internal error"
+    }
+    
+    and: "client with retry policy"
+    def client = createTestClient {
+        retryPolicy = new RetryPolicy.Config().tap {
+            maxAttempts(3)
+            backoffExponential(100, 1000, false)
+            on5xx(true)
+        }.build()
+    }
+    
+    when: "making request"
+    client.getSync("/flaky")
+    
+    then: "throws exception after retries"
+    thrown(HttpResponseException)
+    
+    and: "multiple attempts were made"
+    def requests = getRecordedRequests("/flaky")
+    requests.size() >= 1
+}
+----
+
+=### Testing with Headers
+
+[source,groovy]
+----
+def "should send authentication header"() {
+    given: "secured endpoint"
+    mockEndpoint("/admin/users") {
+        status 200
+        json([users: []])
+    }
+    
+    and: "client with auth"
+    def client = createTestClient()
+    client.setHeader("Authorization", "Bearer secret123")
+    
+    when: "accessing secured endpoint"
+    def response = client.getSync("/admin/users")
+    
+    then:
+    response.statusCode == 200
+    
+    and: "auth header was sent"
+    verifyRequest("/admin/users")
+        .wasCalled()
+        .withHeader("Authorization", "Bearer secret123")
+}
+----
+
+=== Testing with Cookies
+
+[source,groovy]
+----
+def "should maintain session cookie"() {
+    given: "login endpoint that sets cookie"
+    mockEndpoint("/login") {
+        status 200
+        json([success: true])
+    }
+    
+    and: "profile endpoint"
+    mockEndpoint("/profile") {
+        status 200
+        json([name: "Alice"])
+    }
+    
+    when: "logging in"
+    def client = createTestClient()
+    client.postSync("/login", null) {
+        form(username: "alice", password: "secret")
+    }
+    
+    and: "setting session cookie"
+    client.addCookie("session", "abc123")
+    
+    and: "accessing profile"
+    client.getSync("/profile")
+    
+    then: "requests were made"
+    verifyRequest("/login").wasCalled()
+    verifyRequest("/profile").wasCalled()
+}
+----
+
+== Data-Driven Tests
+
+[source,groovy]
+----
+def "should handle different status codes"() {
+    given: "endpoint returning status"
+    mockEndpoint("/api") {
+        status statusCode
+        body message
+    }
+    
+    when: "making request"
+    def client = createTestClient()
+    try {
+        client.getSync("/api")
+        success = true
+    } catch (HttpResponseException e) {
+        success = false
+    }
+    
+    then:
+    success == shouldSucceed
+    
+    where:
+    statusCode | message        | shouldSucceed
+    200        | "OK"           | true
+    201        | "Created"      | true
+    204        | ""             | true
+    400        | "Bad Request"  | false
+    404        | "Not Found"    | false
+    500        | "Server Error" | false
+}
+----
+
+[source,groovy]
+----
+def "should handle different content types"() {
+    given: "endpoint with content type"
+    mockEndpoint("/data") {
+        status 200
+        contentType contentType
+        body responseBody
+    }
+    
+    when: "fetching data"
+    def client = createTestClient()
+    def response = client.getSync("/data")
+    
+    then:
+    response.contentType == contentType
+    
+    where:
+    contentType             | responseBody
+    "application/json"      | '{"key":"value"}'
+    "text/plain"            | "Hello, World!"
+    "text/html"             | "<h1>Title</h1>"
+    "application/xml"       | "<root><item/></root>"
+}
+----
+
+== Testing Patterns
+
+=== Testing Paginated APIs
+
+[source,groovy]
+----
+def "should fetch all pages"() {
+    given: "paginated endpoints"
+    mockEndpoint("/users?page=1") {
+        json([
+            users: [[id: 1], [id: 2]],
+            page: 1,
+            total_pages: 2
+        ])
+    }
+    
+    mockEndpoint("/users?page=2") {
+        json([
+            users: [[id: 3], [id: 4]],
+            page: 2,
+            total_pages: 2
+        ])
+    }
+    
+    when: "fetching all pages"
+    def client = createTestClient()
+    def allUsers = []
+    
+    (1..2).each { page ->
+        def response = client.getSync("/users") {
+            query(page: page)
+        }
+        allUsers.addAll(response.json.users)
+    }
+    
+    then:
+    allUsers.size() == 4
+    
+    and: "both pages were fetched"
+    verifyRequest("/users").wasCalled(2)
+}
+----
+
+=== Testing Error Recovery
+
+[source,groovy]
+----
+def "should fall back on error"() {
+    given: "primary endpoint fails"
+    mockEndpoint("/primary") {
+        status 503
+        body "Service unavailable"
+    }
+    
+    and: "fallback endpoint succeeds"
+    mockEndpoint("/fallback") {
+        status 200
+        json([data: "fallback"])
+    }
+    
+    when: "service tries primary then fallback"
+    def result = service.fetchWithFallback()
+    
+    then:
+    result.data == "fallback"
+    
+    and: "both were attempted"
+    verifyRequest("/primary").wasCalled()
+    verifyRequest("/fallback").wasCalled()
+}
+----
+
+=== Testing Rate Limiting
+
+[source,groovy]
+----
+def "should respect rate limits"() {
+    given: "rate-limited endpoint"
+    mockEndpoint("/api/data") {
+        status 429
+        json([error: "Rate limit exceeded"])
+        header "X-RateLimit-Reset", "60"
+    }
+    
+    when: "making request"
+    def client = createTestClient()
+    client.getSync("/api/data")
+    
+    then: "throws exception"
+    def ex = thrown(HttpResponseException)
+    ex.statusCode == 429
+    
+    and: "request was made"
+    verifyRequest("/api/data").wasCalled()
+}
+----
+
+## Trait Implementation Details
+
+The trait provides:
+
+[source,groovy]
+----
+trait HttpClientTestTrait {
+    @Shared
+    private HttpClientTestDsl _testServer
+    
+    // Lazy initialization
+    HttpClientTestDsl getTestServer() {
+        if (_testServer == null) {
+            _testServer = HttpClientTestDsl.create()
+            _testServer.start()
+        }
+        _testServer
+    }
+    
+    // Convenience methods
+    String getTestServerUrl() { testServer.baseUrl }
+    
+    GroovyHttpClient createTestClient(Closure config = null) {
+        testServer.createClient(config)
+    }
+    
+    MockEndpoint mockEndpoint(String path) {
+        testServer.when(path)
+    }
+    
+    MockEndpoint mockEndpoint(String path, Closure config) {
+        testServer.when(path).respondWith(config)
+    }
+    
+    RequestVerification verifyRequest(String path) {
+        testServer.verify(path)
+    }
+    
+    void resetTestServer() {
+        testServer.reset()
+    }
+    
+    List<RecordedRequest> getRecordedRequests(String path = null) {
+        path ? testServer.getRequestsFor(path) : testServer.recordedRequests
+    }
+    
+    void stopTestServer() {
+        _testServer?.stop()
+        _testServer = null
+    }
+}
+----
+
+## Comparison: Direct vs Trait
+
+*Without Trait*:
+[source,groovy]
+----
+class ApiSpec extends Specification {
+    HttpClientTestDsl testDsl
+    GroovyHttpClient client
+    
+    def setup() {
+        testDsl = HttpClientTestDsl.create()
+        testDsl.start()
+        client = testDsl.createClient()
+    }
+    
+    def cleanup() {
+        testDsl.stop()
+    }
+    
+    def "test"() {
+        testDsl.when("/api").respondWithStatus(200)
+        def response = client.getSync("/api")
+        testDsl.verify("/api").wasCalled()
+    }
+}
+----
+
+*With Trait*:
+[source,groovy]
+----
+class ApiSpec extends Specification implements HttpClientTestTrait {
+    
+    def "test"() {
+        mockEndpoint("/api") { status 200 }
+        def response = createTestClient().getSync("/api")
+        verifyRequest("/api").wasCalled()
+    }
+}
+----
+
+Much cleaner! 🎉
+
+## Best Practices
+
+=== Reset Between Tests
+
+[source,groovy]
+----
+def cleanup() {
+    resetTestServer()
+}
+----
+
+This ensures tests don't interfere with each other.
+
+=### Group Related Tests
+
+[source,groovy]
+----
+class UserApiSpec extends Specification implements HttpClientTestTrait {
+    
+    // User CRUD tests
+    def "should create user"() { /* ... */ }
+    def "should read user"() { /* ... */ }
+    def "should update user"() { /* ... */ }
+    def "should delete user"() { /* ... */ }
+    
+    // Error handling tests
+    def "should handle 404"() { /* ... */ }
+    def "should handle 500"() { /* ... */ }
+    
+    // Authentication tests
+    def "should require auth"() { /* ... */ }
+    def "should reject bad token"() { /* ... */ }
+}
+----
+
+=== Use Helper Methods
+
+[source,groovy]
+----
+class ApiSpec extends Specification implements HttpClientTestTrait {
+    
+    private mockSuccessfulUser() {
+        mockEndpoint("/users/123") {
+            json([id: 123, name: "Alice"])
+        }
+    }
+    
+    private mockMissingUser() {
+        mockEndpoint("/users/999") {
+            status 404
+            json([error: "Not found"])
+        }
+    }
+    
+    def "test 1"() {
+        given:
+        mockSuccessfulUser()
+        // ...
+    }
+    
+    def "test 2"() {
+        given:
+        mockMissingUser()
+        // ...
+    }
+}
+----
+
+=== Document Test Intent
+
+[source,groovy]
+----
+def "should create user with all required fields"() {
+    given: "a valid user payload"
+    mockEndpoint("/users") {
+        status 201
+        json([id: 123, name: "Alice", email: "alice@example.com"])
+    }
+    
+    when: "creating user with name and email"
+    def client = createTestClient()
+    def response = client.postSync("/users", null) {
+        json([
+            name: "Alice",
+            email: "alice@example.com"
+        ])
+    }
+    
+    then: "user is created successfully"
+    response.statusCode == 201
+    response.json.id == 123
+    
+    and: "all required fields are present"
+    response.json.name == "Alice"
+    response.json.email == "alice@example.com"
+    
+    and: "correct API call was made"
+    verifyRequest("/users")
+        .wasCalled()
+        .withMethod("POST")
+        .withHeader("Content-Type", "application/json")
+        .withBodyContaining("Alice")
+        .withBodyContaining("alice@example.com")
+}
+----
+
+## Limitations
+
+The trait uses a *shared* test server instance:
+
+* Faster (no server restart between tests)
+* Must call `resetTestServer()` to avoid test interference
+* Port is assigned once and reused
+
+For tests requiring separate servers, use `HttpClientTestDsl` directly.
+
+## Troubleshooting
+
+=== Tests Interfering with Each Other
+
+**Problem**: Test B fails because Test A's mocked endpoints still exist.
+
+**Solution**: Call `resetTestServer()` in `cleanup()`:
+
+[source,groovy]
+----
+def cleanup() {
+    resetTestServer()
+}
+----
+
+=== "Server not started" Error
+
+**Problem**: Trying to use `testServerUrl` before server is initialized.
+
+**Solution**: Access `testServer` property first to trigger initialization:
+
+[source,groovy]
+----
+def "test"() {
+    given:
+    testServer  // Trigger initialization
+    def url = testServerUrl  // Now available
+}
+----
+
+Or just use the helper methods which handle this automatically.
+
+=== Port Conflicts
+
+The trait uses a single shared server for all tests, so port conflicts shouldn't occur. If you need multiple servers, use `HttpClientTestDsl` directly.
+
+## Next Steps
+
+You now have all the tools for comprehensive HTTP client testing:
+
+* <<examples,Real-World Examples>> — Complete, working test suites
+* <<best-practices,Testing Best Practices>> — Patterns and anti-patterns
+* <<architecture,Architecture Overview>> — Understanding the full picture

@@ -1,3 +1,22 @@
+
+/*
+ * Minimal Gradle 9+ settings for GroovyFX modernization
+ * - Removes jcenter()
+ * - Keeps only repositories needed to resolve plugins and dependencies
+ */
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        mavenCentral()
+        mavenLocal()
+    }
+}
+
 rootProject.name = 'groovy-HttpClient'
-
-

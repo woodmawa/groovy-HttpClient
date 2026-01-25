@@ -58,3 +58,6 @@ target/
 
 ### Dependencies (if local libs are built)
 lib/
+
+### Build Secrets ###
+gradle.properties

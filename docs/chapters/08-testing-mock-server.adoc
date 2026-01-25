@@ -1,0 +1,863 @@
+[[testing-mock-server]]
+= Testing with MockHttpServer
+
+== Overview
+
+`MockHttpServer` is a lightweight, dependency-free HTTP test server built on Java's `com.sun.net.httpserver.HttpServer`. It provides comprehensive request validation capabilities perfect for testing HTTP clients without external dependencies or complex setup.
+
+[quote]
+____
+Testing HTTP clients shouldn't require Docker containers or external services. MockHttpServer makes testing fast, reliable, and simple.
+____
+
+=== Key Features
+
+* ✅ Zero external dependencies (uses only JDK)
+* ✅ Automatic port allocation (no conflicts)
+* ✅ Request validation (headers, cookies, multipart)
+* ✅ Flexible response configuration
+* ✅ Latency simulation
+* ✅ Thread-safe for concurrent tests
+* ✅ Spock and JUnit 5 compatible
+
+=== When to Use MockHttpServer
+
+[horizontal]
+*Unit Tests*:: Verify client behavior without network calls
+*Integration Tests*:: Test HTTP interactions in isolation
+*Multipart Testing*:: Validate file upload payloads
+*Error Simulation*:: Test retry logic, timeouts, error handling
+*Cookie Testing*:: Verify cookie flow across requests
+
+== Quick Start
+
+=== Basic Server Setup
+
+[source,groovy]
+----
+import org.softwood.test.MockHttpServer
+
+// Create server
+def server = new MockHttpServer()
+server.init()  // Starts on random port
+
+try {
+    // Configure endpoints
+    server.addRequestCheck("GET", "/hello", 200)
+        .withResponseBody("Hello, World!")
+    
+    // Create client pointing to server
+    def client = new GroovyHttpClient("http://localhost:${server.port}")
+    
+    // Make request
+    def response = client.getSync("/hello")
+    
+    assert response.statusCode == 200
+    assert response.body == "Hello, World!"
+    
+} finally {
+    server.shutdown()
+}
+----
+
+=== With Groovy Try-With-Resources
+
+For automatic cleanup:
+
+[source,groovy]
+----
+def server = new MockHttpServer()
+server.init()
+
+try {
+    server.addRequestCheck("GET", "/data", 200)
+        .withResponseBody('{"status":"ok"}')
+    
+    def client = new GroovyHttpClient("http://localhost:${server.port}")
+    def response = client.getSync("/data")
+    
+    assert response.json.status == "ok"
+} finally {
+    server.shutdown()
+}
+----
+
+== Request Validation
+
+=== Method Validation
+
+Ensure requests use the correct HTTP method:
+
+[source,groovy]
+----
+// Only accept POST
+server.addRequestCheck("POST", "/users", 201)
+    .withResponseBody('{"id":123}')
+
+// GET returns 405 Method Not Allowed
+def response = client.getSync("/users")
+assert response.statusCode == 405
+----
+
+=== Header Validation
+
+Verify required headers are present:
+
+[source,groovy]
+----
+server.addRequestCheck("POST", "/api/data", 201)
+    .withExpectedHeaders([
+        "Content-Type": ["application/json"],
+        "X-API-Key": ["secret123"]
+    ])
+    .withResponseBody('{"created":true}')
+
+// Request without headers → 400
+def response1 = client.postSync("/api/data", "{}")
+assert response1.statusCode == 400
+
+// Request with headers → 201
+def response2 = client.postSync("/api/data", "{}") {
+    header "Content-Type", "application/json"
+    header "X-API-Key", "secret123"
+}
+assert response2.statusCode == 201
+----
+
+[NOTE]
+====
+Header matching is *case-insensitive* and supports multiple values per header.
+====
+
+=== Cookie Validation
+
+Validate cookies sent by the client:
+
+[source,groovy]
+----
+server.addRequestCheck("GET", "/profile", 200)
+    .withExpectedCookies([
+        session: "abc123",
+        user_id: "42"
+    ])
+    .withResponseBody('{"name":"Alice"}')
+
+// Add cookies to client
+client.addCookie("session", "abc123")
+client.addCookie("user_id", "42")
+
+def response = client.getSync("/profile")
+assert response.statusCode == 200
+----
+
+Missing or mismatched cookies return 400:
+
+[source,groovy]
+----
+// Wrong cookie value
+client.addCookie("session", "wrong")
+def response = client.getSync("/profile")
+assert response.statusCode == 400
+----
+
+=== Query Parameter Validation
+
+While MockHttpServer doesn't have built-in query parameter validation, you can validate via custom checks:
+
+[source,groovy]
+----
+server.addRequestCheck("GET", "/search", 200)
+    .withResponseBody('{"results":[]}')
+
+def response = client.getSync("/search") {
+    query(q: "groovy", limit: 10)
+}
+
+// Manually verify query params if needed
+assert response.statusCode == 200
+----
+
+== Response Configuration
+
+=== Status Codes
+
+Configure response status:
+
+[source,groovy]
+----
+// Success
+server.addRequestCheck("GET", "/ok", 200)
+
+// Created
+server.addRequestCheck("POST", "/users", 201)
+
+// No Content
+server.addRequestCheck("DELETE", "/users/123", 204)
+
+// Not Found
+server.addRequestCheck("GET", "/missing", 404)
+
+// Server Error
+server.addRequestCheck("GET", "/error", 500)
+----
+
+=== Response Bodies
+
+*Plain Text*:
+[source,groovy]
+----
+server.addRequestCheck("GET", "/text", 200)
+    .withResponseBody("Hello, World!")
+----
+
+*JSON*:
+[source,groovy]
+----
+import groovy.json.JsonOutput
+
+def jsonData = [
+    id: 123,
+    name: "Alice",
+    roles: ["admin", "user"]
+]
+
+server.addRequestCheck("GET", "/user", 200)
+    .withResponseBody(JsonOutput.toJson(jsonData))
+    .withResponseHeaders(["Content-Type": ["application/json"]])
+----
+
+*Empty Body*:
+[source,groovy]
+----
+server.addRequestCheck("DELETE", "/users/123", 204)
+    .withResponseBody("")  // or omit entirely
+----
+
+=== Response Headers
+
+*Single Header*:
+[source,groovy]
+----
+server.addRequestCheck("GET", "/data", 200)
+    .withResponseBody('{"data":"value"}')
+    .withResponseHeaders([
+        "Content-Type": ["application/json"]
+    ])
+----
+
+*Multiple Headers*:
+[source,groovy]
+----
+server.addRequestCheck("GET", "/resource", 200)
+    .withResponseHeaders([
+        "Content-Type": ["application/json"],
+        "Cache-Control": ["no-cache", "no-store"],
+        "X-RateLimit-Remaining": ["42"]
+    ])
+----
+
+[TIP]
+====
+Always set `Content-Type` for non-text responses to ensure proper parsing by clients.
+====
+
+=== Response Cookies
+
+Set cookies in the response:
+
+[source,groovy]
+----
+server.addRequestCheck("POST", "/login", 200)
+    .withResponseBody('{"success":true}')
+    .withResponseCookies([
+        session: "abc123",
+        user_id: "42"
+    ])
+
+def response = client.postSync("/login", null) {
+    form(username: "alice", password: "secret")
+}
+
+// Cookies automatically stored by client
+assert client.getCookie("session").value == "abc123"
+----
+
+== Simulating Latency
+
+Add artificial delays to responses:
+
+[source,groovy]
+----
+// Slow endpoint (1 second delay)
+server.addRequestCheck("GET", "/slow", 200)
+    .withResponseBody('{"data":"delayed"}')
+    .withDelay(1000)
+
+def start = System.currentTimeMillis()
+def response = client.getSync("/slow")
+def elapsed = System.currentTimeMillis() - start
+
+assert elapsed >= 1000
+assert response.statusCode == 200
+----
+
+Use cases for delays:
+
+* Testing timeout behavior
+* Simulating slow APIs
+* Testing retry logic
+* Load testing with realistic latency
+
+[source,groovy]
+----
+// Test timeout handling
+server.addRequestCheck("GET", "/timeout", 200)
+    .withDelay(5000)  // 5 second delay
+
+def config = SecurityConfig.testing("http://localhost:${server.port}")
+    .withOverrides([requestTimeout: Duration.ofSeconds(2)])
+
+def client = new GroovyHttpClient(config)
+
+try {
+    client.getSync("/timeout")
+    assert false, "Should have timed out"
+} catch (HttpTimeoutException e) {
+    // Expected
+}
+----
+
+== Error Simulation
+
+=== Client Errors (4xx)
+
+[source,groovy]
+----
+// Bad Request
+server.addRequestCheck("POST", "/users", 400)
+    .withResponseBody('{"error":"Invalid email"}')
+
+// Unauthorized
+server.addRequestCheck("GET", "/admin", 401)
+    .withResponseBody('{"error":"Authentication required"}')
+
+// Forbidden
+server.addRequestCheck("DELETE", "/system", 403)
+    .withResponseBody('{"error":"Insufficient permissions"}')
+
+// Not Found
+server.addRequestCheck("GET", "/missing", 404)
+    .withResponseBody('{"error":"Resource not found"}')
+----
+
+=== Server Errors (5xx)
+
+[source,groovy]
+----
+// Internal Server Error
+server.addRequestCheck("GET", "/buggy", 500)
+    .withResponseBody('{"error":"Internal server error"}')
+
+// Bad Gateway
+server.addRequestCheck("GET", "/proxy", 502)
+    .withResponseBody('{"error":"Upstream service unavailable"}')
+
+// Service Unavailable
+server.addRequestCheck("GET", "/maintenance", 503)
+    .withResponseBody('{"error":"Service under maintenance"}')
+
+// Gateway Timeout
+server.addRequestCheck("GET", "/slow-upstream", 504)
+    .withResponseBody('{"error":"Upstream timeout"}')
+----
+
+=== Testing Retry Logic
+
+[source,groovy]
+----
+import java.util.concurrent.atomic.AtomicInteger
+
+def attemptCount = new AtomicInteger(0)
+
+// Fail first 2 attempts, succeed on 3rd
+server.addRequestCheck("GET", "/flaky", 200)
+    .withResponseBody('{"success":true}')
+
+// Client with retry policy
+def retryPolicy = new RetryPolicy.Config().tap {
+    maxAttempts(3)
+    backoffExponential(100, 1000, false)
+    on5xx(true)
+}.build()
+
+def config = SecurityConfig.testing("http://localhost:${server.port}")
+    .withOverrides([retryPolicy: retryPolicy])
+
+def client = new GroovyHttpClient(config)
+
+// Add interceptor to track attempts
+client.addInterceptor { ctx, next ->
+    attemptCount.incrementAndGet()
+    next.call(ctx)
+}
+
+def response = client.getSync("/flaky")
+assert attemptCount.get() >= 1  // At least one attempt made
+----
+
+== Multipart Request Testing
+
+MockHttpServer can validate multipart/form-data uploads:
+
+[source,groovy]
+----
+server.addRequestCheck("POST", "/upload", 200)
+    .withExpectedMultipart([
+        [name: "file", filename: "test.txt", content: "Hello!".bytes],
+        [name: "description", content: "Test file".bytes]
+    ])
+    .withResponseBody('{"uploaded":true}')
+
+// Client upload
+def response = client.postMultipartSync("/upload") {
+    part {
+        name "file"
+        filename "test.txt"
+        content "Hello!"
+    }
+    part {
+        name "description"
+        content "Test file"
+    }
+}
+
+assert response.statusCode == 200
+----
+
+[NOTE]
+====
+Multipart validation checks:
+
+* Part names match
+* Filenames match (if specified)
+* Content-Types match (if specified)
+* Binary content matches byte-for-byte
+====
+
+== Spock Integration
+
+MockHttpServer integrates seamlessly with Spock:
+
+[source,groovy]
+----
+import spock.lang.Specification
+import spock.lang.AutoCleanup
+
+class UserApiSpec extends Specification {
+    
+    @AutoCleanup
+    MockHttpServer server = new MockHttpServer()
+    
+    GroovyHttpClient client
+    
+    def setup() {
+        server.init()
+        client = new GroovyHttpClient("http://localhost:${server.port}")
+    }
+    
+    def "should fetch user by ID"() {
+        given: "a mocked user endpoint"
+        server.addRequestCheck("GET", "/users/123", 200)
+            .withResponseBody('{"id":123,"name":"Alice"}')
+            .withResponseHeaders(["Content-Type": ["application/json"]])
+        
+        when: "fetching user"
+        def response = client.getSync("/users/123")
+        def user = response.json
+        
+        then: "user data is correct"
+        response.statusCode == 200
+        user.id == 123
+        user.name == "Alice"
+    }
+    
+    def "should handle missing users"() {
+        given: "a 404 response"
+        server.addRequestCheck("GET", "/users/999", 404)
+            .withResponseBody('{"error":"Not found"}')
+        
+        when: "fetching non-existent user"
+        client.getSync("/users/999")
+        
+        then: "throws exception"
+        def ex = thrown(HttpResponseException)
+        ex.statusCode == 404
+    }
+    
+    def "should validate authentication headers"() {
+        given: "an endpoint requiring auth"
+        server.addRequestCheck("GET", "/admin", 200)
+            .withExpectedHeaders(["Authorization": ["Bearer secret"]])
+            .withResponseBody('{"data":"sensitive"}')
+        
+        and: "client with auth header"
+        client.setHeader("Authorization", "Bearer secret")
+        
+        when: "making authenticated request"
+        def response = client.getSync("/admin")
+        
+        then: "request succeeds"
+        response.statusCode == 200
+    }
+    
+    def "should handle rate limiting"() {
+        given: "a rate-limited endpoint"
+        server.addRequestCheck("GET", "/api/data", 429)
+            .withResponseBody('{"error":"Rate limit exceeded"}')
+            .withResponseHeaders(["Retry-After": ["60"]])
+        
+        when: "exceeding rate limit"
+        def response = client.getSync("/api/data")
+        
+        then: "returns 429"
+        def ex = thrown(HttpResponseException)
+        ex.statusCode == 429
+    }
+}
+----
+
+=== Setup/Cleanup Patterns
+
+*Per-Test Cleanup*:
+[source,groovy]
+----
+class ApiSpec extends Specification {
+    MockHttpServer server
+    
+    def setup() {
+        server = new MockHttpServer()
+        server.init()
+    }
+    
+    def cleanup() {
+        server?.shutdown()
+    }
+}
+----
+
+*Shared Server (Faster)*:
+[source,groovy]
+----
+class ApiSpec extends Specification {
+    @Shared
+    MockHttpServer server = new MockHttpServer()
+    
+    def setupSpec() {
+        server.init()
+    }
+    
+    def cleanupSpec() {
+        server.shutdown()
+    }
+    
+    def cleanup() {
+        // Reset endpoints between tests
+        server.checks.clear()
+    }
+}
+----
+
+== JUnit 5 Integration
+
+[source,groovy]
+----
+import org.junit.jupiter.api.*
+
+class UserApiTest {
+    private MockHttpServer server
+    private GroovyHttpClient client
+    
+    @BeforeEach
+    void setup() {
+        server = new MockHttpServer()
+        server.init()
+        client = new GroovyHttpClient("http://localhost:${server.port}")
+    }
+    
+    @AfterEach
+    void teardown() {
+        server.shutdown()
+    }
+    
+    @Test
+    void shouldFetchUser() {
+        // given
+        server.addRequestCheck("GET", "/users/123", 200)
+            .withResponseBody('{"id":123,"name":"Alice"}')
+        
+        // when
+        def response = client.getSync("/users/123")
+        
+        // then
+        Assertions.assertEquals(200, response.statusCode)
+        Assertions.assertEquals("Alice", response.json.name)
+    }
+}
+----
+
+== Advanced Patterns
+
+=== Dynamic Response Generation
+
+[source,groovy]
+----
+def userDb = [
+    "123": [id: 123, name: "Alice"],
+    "456": [id: 456, name: "Bob"]
+]
+
+// Note: MockHttpServer doesn't support dynamic responses directly
+// For complex scenarios, use HttpClientTestDsl instead
+----
+
+=== Multiple Endpoints
+
+[source,groovy]
+----
+server.addRequestCheck("GET", "/users", 200)
+    .withResponseBody('[{"id":1},{"id":2}]')
+    .withResponseHeaders(["Content-Type": ["application/json"]])
+
+server.addRequestCheck("GET", "/users/123", 200)
+    .withResponseBody('{"id":123,"name":"Alice"}')
+    .withResponseHeaders(["Content-Type": ["application/json"]])
+
+server.addRequestCheck("POST", "/users", 201)
+    .withExpectedHeaders(["Content-Type": ["application/json"]])
+    .withResponseBody('{"id":789}')
+    .withResponseHeaders(["Content-Type": ["application/json"]])
+
+server.addRequestCheck("DELETE", "/users/123", 204)
+----
+
+=== Testing Redirect Handling
+
+[source,groovy]
+----
+// MockHttpServer doesn't directly support redirects
+// Test redirect handling by:
+// 1. Returning 301/302 with Location header
+// 2. Verifying client follows (or doesn't follow) redirect
+
+server.addRequestCheck("GET", "/old-url", 301)
+    .withResponseHeaders(["Location": ["http://localhost:${server.port}/new-url"]])
+    .withResponseBody("")
+
+server.addRequestCheck("GET", "/new-url", 200)
+    .withResponseBody('{"redirected":true}')
+
+// Client with redirects enabled
+def config = SecurityConfig.testing("http://localhost:${server.port}")
+    .withOverrides([allowRedirects: true])
+
+def client = new GroovyHttpClient(config)
+def response = client.getSync("/old-url")
+// Response should be from /new-url
+----
+
+=== Cookie Flow Testing
+
+[source,groovy]
+----
+// Login sets cookie
+server.addRequestCheck("POST", "/login", 200)
+    .withResponseCookies([session: "abc123"])
+    .withResponseBody('{"success":true}')
+
+// Profile requires cookie
+server.addRequestCheck("GET", "/profile", 200)
+    .withExpectedCookies([session: "abc123"])
+    .withResponseBody('{"name":"Alice"}')
+
+// Logout clears cookie
+server.addRequestCheck("POST", "/logout", 200)
+    .withExpectedCookies([session: "abc123"])
+    .withResponseBody('{"success":true}')
+
+// Test flow
+def loginResp = client.postSync("/login", null) {
+    form(username: "alice", password: "secret")
+}
+assert loginResp.statusCode == 200
+
+// Cookie automatically included
+def profileResp = client.getSync("/profile")
+assert profileResp.statusCode == 200
+
+def logoutResp = client.postSync("/logout", "")
+assert logoutResp.statusCode == 200
+----
+
+== Best Practices
+
+=== Use Descriptive Endpoints
+
+[source,groovy]
+----
+// ✅ Good: Descriptive, intention-revealing
+server.addRequestCheck("GET", "/users/123", 200)
+    .withResponseBody('{"id":123,"name":"Alice"}')
+
+server.addRequestCheck("POST", "/users/activate", 200)
+    .withExpectedHeaders(["X-Admin-Token": ["secret"]])
+
+// ❌ Avoid: Generic, unclear
+server.addRequestCheck("GET", "/test", 200)
+server.addRequestCheck("POST", "/endpoint", 201)
+----
+
+=== Organize Tests by Scenario
+
+[source,groovy]
+----
+class UserApiSpec extends Specification {
+    MockHttpServer server
+    GroovyHttpClient client
+    
+    def setup() {
+        server = new MockHttpServer()
+        server.init()
+        client = new GroovyHttpClient("http://localhost:${server.port}")
+    }
+    
+    def cleanup() {
+        server.shutdown()
+    }
+    
+    def "GET /users - success"() { /* ... */ }
+    def "GET /users - unauthorized"() { /* ... */ }
+    def "GET /users - server error"() { /* ... */ }
+    
+    def "POST /users - create success"() { /* ... */ }
+    def "POST /users - validation error"() { /* ... */ }
+    
+    def "DELETE /users/123 - success"() { /* ... */ }
+    def "DELETE /users/123 - not found"() { /* ... */ }
+}
+----
+
+=== Reset State Between Tests
+
+[source,groovy]
+----
+def cleanup() {
+    server.checks.clear()  // Clear registered endpoints
+}
+----
+
+=== Use Realistic Response Data
+
+[source,groovy]
+----
+// ✅ Realistic
+def userData = [
+    id: 123,
+    name: "Alice Smith",
+    email: "alice@example.com",
+    created_at: "2024-01-15T10:30:00Z",
+    roles: ["user", "admin"]
+]
+
+// ❌ Minimal (harder to catch bugs)
+def userData = [id: 1, name: "A"]
+----
+
+=== Test Error Scenarios
+
+Don't just test happy paths:
+
+[source,groovy]
+----
+def "should handle 400 Bad Request"() { /* ... */ }
+def "should handle 401 Unauthorized"() { /* ... */ }
+def "should handle 404 Not Found"() { /* ... */ }
+def "should handle 500 Internal Server Error"() { /* ... */ }
+def "should handle 503 Service Unavailable"() { /* ... */ }
+def "should retry on timeout"() { /* ... */ }
+def "should open circuit breaker on failures"() { /* ... */ }
+----
+
+## Limitations
+
+MockHttpServer is designed for straightforward request/response testing. For more complex scenarios, consider using `HttpClientTestDsl`:
+
+[horizontal]
+*Not Supported*:: Dynamic responses based on request content
+*Not Supported*:: Request body validation (beyond multipart)
+*Not Supported*:: WebSocket connections
+*Not Supported*:: Server-sent events (SSE)
+*Not Supported*:: Chunked transfer encoding
+
+For these scenarios, use <<testing-dsl,HttpClientTestDsl>> which provides more flexibility.
+
+== Troubleshooting
+
+=== Port Already in Use
+
+[source,groovy]
+----
+// Solution: Let server choose port automatically
+def server = new MockHttpServer()  // Port 0 = auto-assign
+server.init()
+println "Server running on port: ${server.port}"
+----
+
+=== Headers Not Matching
+
+[source,groovy]
+----
+// Remember: Header names are case-insensitive
+// These are equivalent:
+.withExpectedHeaders(["content-type": ["application/json"]])
+.withExpectedHeaders(["Content-Type": ["application/json"]])
+.withExpectedHeaders(["CONTENT-TYPE": ["application/json"]])
+----
+
+=== Cookies Not Matching
+
+[source,groovy]
+----
+// Cookies are matched exactly (case-sensitive values)
+server.addRequestCheck("GET", "/test", 200)
+    .withExpectedCookies([session: "ABC123"])
+
+// This fails:
+client.addCookie("session", "abc123")  // Wrong case
+
+// This succeeds:
+client.addCookie("session", "ABC123")  // Exact match
+----
+
+=== Server Not Starting
+
+[source,groovy]
+----
+// Always call init() before use
+def server = new MockHttpServer()
+server.init()  // Required!
+
+// Don't forget cleanup
+try {
+    // Tests...
+} finally {
+    server.shutdown()  // Always cleanup
+}
+----
+
+## Next Steps
+
+Now that you understand MockHttpServer, learn about more advanced testing tools:
+
+* <<testing-dsl,HttpClientTestDsl>> — Fluent DSL for flexible testing
+* <<testing-trait,HttpClientTestTrait>> — Spock trait for seamless integration
+* <<examples,Real-World Testing Examples>> — Complete test suite examples

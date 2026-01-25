@@ -1,0 +1,867 @@
+[[url-builder]]
+= URL Builder
+
+== Overview
+
+The `URLBuilder` class provides a fluent, type-safe API for constructing URLs with proper encoding, query parameters, and path handling. It eliminates common pitfalls like forgetting to URL-encode parameters or incorrectly handling array values.
+
+[quote]
+____
+URL construction should be declarative, not string concatenation soup.
+____
+
+=== Why Use URLBuilder?
+
+*Without URLBuilder* (error-prone):
+[source,groovy]
+----
+// ❌ Multiple problems:
+// - No URL encoding
+// - Manual string concatenation  
+// - Error-prone for arrays
+// - Hard to read and maintain
+def url = "https://api.example.com/search?q=" + query + 
+          "&tags=" + tags.join(",") +
+          "&limit=" + limit
+----
+
+*With URLBuilder* (safe and clear):
+[source,groovy]
+----
+// ✅ Proper encoding, clear intent, array-safe
+def url = new URLBuilder("api.example.com")
+    .protocol("https")
+    .path("/search")
+    .param("q", query)
+    .param("tags", tags)      // Array handled automatically
+    .param("limit", limit)
+    .build()
+----
+
+== Basic Usage
+
+=== Simple URL Construction
+
+[source,groovy]
+----
+import org.softwood.url.URLBuilder
+
+def url = new URLBuilder("api.example.com")
+    .protocol("https")
+    .path("/users")
+    .build()
+    
+// Result: https://api.example.com/users
+----
+
+=== With Port
+
+[source,groovy]
+----
+def url = new URLBuilder("localhost")
+    .protocol("http")
+    .port(8080)
+    .path("/api/v1/status")
+    .build()
+    
+// Result: http://localhost:8080/api/v1/status
+----
+
+=== With Query Parameters
+
+[source,groovy]
+----
+def url = new URLBuilder("api.example.com")
+    .protocol("https")
+    .path("/search")
+    .param("q", "groovy http client")
+    .param("limit", 10)
+    .param("offset", 0)
+    .build()
+    
+// Result: https://api.example.com/search?q=groovy+http+client&limit=10&offset=0
+----
+
+NOTE: All parameter values are automatically URL-encoded. Spaces become `+`, special characters are percent-encoded.
+
+== Query Parameters
+
+=== Single Values
+
+Add parameters one at a time:
+
+[source,groovy]
+----
+def builder = new URLBuilder("api.example.com")
+    .param("userId", 123)
+    .param("format", "json")
+    .param("pretty", true)
+----
+
+=== Multiple Values (Arrays)
+
+URLBuilder automatically handles collections and ranges:
+
+[source,groovy]
+----
+def tags = ["groovy", "http", "client"]
+
+def url = new URLBuilder("api.example.com")
+    .path("/articles")
+    .param("tags", tags)        // Collection
+    .build()
+    
+// Result: https://api.example.com/articles?tags=groovy&tags=http&tags=client
+----
+
+Works with:
+
+* `List` — `param("ids", [1, 2, 3])`
+* `Set` — `param("tags", ["a", "b"] as Set)`
+* `Array` — `param("vals", new String[]{"x", "y"})`
+* `Range` — `param("ids", 1..10)`
+
+=== Bulk Parameters
+
+Add multiple parameters at once:
+
+[source,groovy]
+----
+def params = [
+    q: "search term",
+    limit: 50,
+    offset: 100,
+    sort: "date",
+    order: "desc"
+]
+
+def url = new URLBuilder("api.example.com")
+    .path("/search")
+    .params(params)
+    .build()
+----
+
+TIP: `params()` can be called multiple times. Parameters accumulate.
+
+== Path Handling
+
+=== Simple Paths
+
+[source,groovy]
+----
+def url = new URLBuilder("api.example.com")
+    .path("/users/123/profile")
+    .build()
+----
+
+=== Path With Leading Slash
+
+Leading slashes are handled automatically:
+
+[source,groovy]
+----
+// With slash
+new URLBuilder("api.example.com")
+    .path("/api/users")
+    .build()
+// → https://api.example.com/api/users
+
+// Without slash
+new URLBuilder("api.example.com")
+    .path("api/users")
+    .build()
+// → https://api.example.com/api/users
+----
+
+=== Empty Paths
+
+Omitting the path results in just the host:
+
+[source,groovy]
+----
+def url = new URLBuilder("api.example.com")
+    .build()
+// → https://api.example.com
+----
+
+[WARNING]
+====
+URLBuilder does not perform path segment encoding. If your paths contain special characters, you must encode them yourself:
+
+[source,groovy]
+----
+def fileName = "my document.pdf"
+def encoded = URLEncoder.encode(fileName, "UTF-8")
+
+def url = new URLBuilder("cdn.example.com")
+    .path("/files/$encoded")
+    .build()
+----
+====
+
+== Closure-Based Configuration
+
+For complex URLs, use closure-based configuration:
+
+[source,groovy]
+----
+def url = new URLBuilder {
+    protocol "https"
+    host "api.example.com"
+    port 8443
+    path "/search"
+    
+    param "q", "groovy"
+    param "tags", ["http", "client"]
+    param "limit", 10
+}.build()
+----
+
+This is equivalent to the fluent API but reads more like configuration.
+
+=== Mixed Usage
+
+You can combine constructor arguments with closures:
+
+[source,groovy]
+----
+def url = new URLBuilder("api.example.com") {
+    protocol "https"
+    path "/users"
+    param "active", true
+}.build()
+----
+
+== Advanced Scenarios
+
+=== Building URLs Programmatically
+
+[source,groovy]
+----
+def buildSearchUrl(String host, Map filters) {
+    def builder = new URLBuilder(host)
+        .protocol("https")
+        .path("/search")
+    
+    filters.each { key, value ->
+        if (value != null) {
+            builder.param(key, value)
+        }
+    }
+    
+    return builder.build()
+}
+
+def url = buildSearchUrl("api.example.com", [
+    q: "groovy",
+    limit: 10,
+    tags: ["http", "client"]
+])
+----
+
+=== Conditional Parameters
+
+Only add parameters when needed:
+
+[source,groovy]
+----
+def builder = new URLBuilder("api.example.com")
+    .path("/articles")
+    .param("limit", 10)
+
+if (author) {
+    builder.param("author", author)
+}
+
+if (tags) {
+    builder.param("tags", tags)
+}
+
+if (since) {
+    builder.param("since", since.format("yyyy-MM-dd"))
+}
+
+def url = builder.build()
+----
+
+=== URL Validation
+
+Check if the built URL is valid:
+
+[source,groovy]
+----
+def builder = new URLBuilder("api.example.com")
+    .path("/users")
+
+try {
+    def url = builder.build()
+    
+    if (builder.isValidURL(url)) {
+        // Proceed with URL
+    }
+} catch (IllegalStateException e) {
+    // Invalid configuration
+    println "URL build failed: ${e.message}"
+}
+----
+
+NOTE: `isValidURL()` performs basic URL syntax validation using `java.net.URI`.
+
+== Integration with GroovyHttpClient
+
+URLBuilder complements GroovyHttpClient perfectly:
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient
+import org.softwood.url.URLBuilder
+
+def baseUrl = new URLBuilder("api.github.com")
+    .protocol("https")
+    .build()
+
+def client = new GroovyHttpClient(baseUrl)
+
+// Build complex search URL
+def searchPath = new URLBuilder()
+    .path("/search/repositories")
+    .param("q", "language:groovy")
+    .param("sort", "stars")
+    .param("order", "desc")
+    .param("per_page", 10)
+    .build()
+    .replaceFirst("https?://[^/]+", "")  // Extract just the path+query
+
+def response = client.getSync(searchPath)
+def repos = response.json.items
+----
+
+TIP: For simple cases, use `GroovyHttpClient`'s built-in query DSL. For complex URL construction, use URLBuilder.
+
+=== Using with Absolute URLs
+
+[source,groovy]
+----
+def url = new URLBuilder("cdn.example.com")
+    .protocol("https")
+    .path("/files/document.pdf")
+    .param("v", "1.2.3")
+    .param("dl", 1)
+    .build()
+
+def config = SecurityConfig.production(baseApiUrl)
+    .withOverrides([
+        allowAbsoluteUrls: true,
+        allowedHosts: ["api.example.com", "cdn.example.com"] as Set
+    ])
+
+def client = new GroovyHttpClient(config)
+def bytes = client.downloadBytesSync(url)
+----
+
+== Character Encoding
+
+URLBuilder uses UTF-8 encoding for all parameters:
+
+[source,groovy]
+----
+def url = new URLBuilder("api.example.com")
+    .path("/search")
+    .param("q", "日本語")
+    .param("emoji", "🚀")
+    .build()
+    
+// Result: https://api.example.com/search?q=%E6%97%A5%E6%9C%AC%E8%AA%9E&emoji=%F0%9F%9A%80
+----
+
+=== Special Characters
+
+Common special characters are handled correctly:
+
+[cols="1,2,2"]
+|===
+|Character |Example |Encoded
+
+|Space
+|`hello world`
+|`hello+world`
+
+|Plus
+|`a+b`
+|`a%2Bb`
+
+|Forward Slash  
+|`path/to/file`
+|`path%2Fto%2Ffile`
+
+|Question Mark
+|`what?`
+|`what%3F`
+
+|Ampersand
+|`a&b`
+|`a%26b`
+
+|Equals
+|`x=y`
+|`x%3Dy`
+
+|Hash/Fragment
+|`#section`
+|`%23section`
+|===
+
+== Error Handling
+
+=== Missing Host
+
+URLBuilder requires a host:
+
+[source,groovy]
+----
+try {
+    def url = new URLBuilder()  // No host!
+        .path("/users")
+        .build()
+} catch (IllegalStateException e) {
+    println e.message  // "Host is required to build a URL"
+}
+----
+
+=== Invalid URI Syntax
+
+Malformed URLs throw exceptions:
+
+[source,groovy]
+----
+try {
+    def url = new URLBuilder("not a valid host!!")
+        .build()
+        
+    // Validate
+    if (!new URLBuilder().isValidURL(url)) {
+        throw new IllegalArgumentException("Invalid URL")
+    }
+} catch (URISyntaxException | MalformedURLException e) {
+    println "URL validation failed: ${e.message}"
+}
+----
+
+== Common Patterns
+
+=== Pagination URLs
+
+[source,groovy]
+----
+def buildPageUrl(String base, int page, int pageSize) {
+    new URLBuilder(base)
+        .protocol("https")
+        .path("/articles")
+        .param("page", page)
+        .param("per_page", pageSize)
+        .param("sort", "created_at")
+        .param("order", "desc")
+        .build()
+}
+
+def urls = (1..5).collect { page ->
+    buildPageUrl("api.example.com", page, 20)
+}
+----
+
+=== Filter URLs
+
+[source,groovy]
+----
+class SearchUrlBuilder {
+    private URLBuilder builder
+    
+    SearchUrlBuilder(String host) {
+        this.builder = new URLBuilder(host)
+            .protocol("https")
+            .path("/search")
+    }
+    
+    SearchUrlBuilder query(String q) {
+        builder.param("q", q)
+        this
+    }
+    
+    SearchUrlBuilder tags(List<String> tags) {
+        if (tags) {
+            builder.param("tags", tags)
+        }
+        this
+    }
+    
+    SearchUrlBuilder dateRange(String from, String to) {
+        if (from) builder.param("from", from)
+        if (to) builder.param("to", to)
+        this
+    }
+    
+    SearchUrlBuilder limit(int limit) {
+        builder.param("limit", limit)
+        this
+    }
+    
+    String build() {
+        builder.build()
+    }
+}
+
+// Usage
+def url = new SearchUrlBuilder("api.example.com")
+    .query("groovy http")
+    .tags(["http", "client"])
+    .dateRange("2024-01-01", "2024-12-31")
+    .limit(50)
+    .build()
+----
+
+=== API Version URLs
+
+[source,groovy]
+----
+def buildApiUrl(String host, String version, String endpoint) {
+    new URLBuilder(host)
+        .protocol("https")
+        .path("/api/${version}${endpoint}")
+        .build()
+}
+
+def url = buildApiUrl("api.example.com", "v2", "/users/123")
+// → https://api.example.com/api/v2/users/123
+----
+
+== Testing with URLBuilder
+
+URLBuilder simplifies test URL construction:
+
+[source,groovy]
+----
+import spock.lang.Specification
+
+class ApiClientSpec extends Specification {
+    
+    def "should build correct search URL"() {
+        given:
+        def builder = new URLBuilder("api.example.com")
+            .path("/search")
+            .param("q", "groovy")
+            .param("limit", 10)
+        
+        when:
+        def url = builder.build()
+        
+        then:
+        url == "https://api.example.com/search?q=groovy&limit=10"
+    }
+    
+    def "should handle array parameters"() {
+        given:
+        def tags = ["http", "client", "groovy"]
+        
+        when:
+        def url = new URLBuilder("api.example.com")
+            .path("/articles")
+            .param("tags", tags)
+            .build()
+        
+        then:
+        url.contains("tags=http")
+        url.contains("tags=client")
+        url.contains("tags=groovy")
+    }
+    
+    def "should encode special characters"() {
+        given:
+        def query = "hello world & friends"
+        
+        when:
+        def url = new URLBuilder("api.example.com")
+            .param("q", query)
+            .build()
+        
+        then:
+        url.contains("q=hello+world+%26+friends")
+    }
+}
+----
+
+== toString() and Build()
+
+URLBuilder implements `toString()` to call `build()` automatically:
+
+[source,groovy]
+----
+def builder = new URLBuilder("api.example.com")
+    .path("/users")
+    .param("active", true)
+
+// These are equivalent:
+def url1 = builder.build()
+def url2 = builder.toString()
+def url3 = "$builder"  // String interpolation
+
+assert url1 == url2 && url2 == url3
+----
+
+TIP: This makes URLBuilder convenient in string contexts without explicit `build()` calls.
+
+== Performance Considerations
+
+URLBuilder is designed for construction, not repeated use:
+
+*Good* — Build once, use many times:
+[source,groovy]
+----
+def baseUrl = new URLBuilder("api.example.com")
+    .protocol("https")
+    .path("/api/v1")
+    .build()
+
+(1..1000).each { i ->
+    def url = "${baseUrl}/users/${i}"
+    // Make request with url
+}
+----
+
+*Avoid* — Building in tight loops:
+[source,groovy]
+----
+// ❌ Creates many builder instances
+(1..1000).each { i ->
+    def url = new URLBuilder("api.example.com")
+        .path("/users/${i}")
+        .build()
+}
+----
+
+NOTE: URLBuilder instances are lightweight, but excessive object creation in hot loops should be avoided.
+
+== API Reference
+
+=== Constructor Options
+
+[cols="2,3"]
+|===
+|Constructor |Description
+
+|`URLBuilder()`
+|Default constructor — host must be set via `host()`
+
+|`URLBuilder(String host)`
+|Constructor with host
+
+|`URLBuilder(Closure config)`
+|Constructor with configuration closure
+|===
+
+=== Fluent Methods
+
+[cols="2,2,3"]
+|===
+|Method |Returns |Description
+
+|`protocol(String)`
+|`URLBuilder`
+|Set protocol (`http` or `https`)
+
+|`host(String)`
+|`URLBuilder`  
+|Set hostname
+
+|`port(Integer)`
+|`URLBuilder`
+|Set port number
+
+|`path(String)`
+|`URLBuilder`
+|Set path segment
+
+|`param(String, Object)`
+|`URLBuilder`
+|Add single query parameter
+
+|`params(Map)`
+|`URLBuilder`
+|Add multiple query parameters
+
+|`build()`
+|`String`
+|Construct final URL string
+
+|`build(Closure)`
+|`String`
+|Apply config closure, then build
+
+|`toString()`
+|`String`
+|Same as `build()`
+
+|`isValidURL(String)`
+|`Boolean`
+|Validate URL syntax
+|===
+
+=== Default Values
+
+[cols="2,3"]
+|===
+|Property |Default
+
+|`protocol`
+|`https`
+
+|`port`
+|None (uses protocol default)
+
+|`path`
+|Empty string (root path)
+
+|`params`
+|Empty map
+|===
+
+== Comparison with Alternatives
+
+=== vs. String Concatenation
+
+[cols="1a,1a"]
+|===
+|String Concat |URLBuilder
+
+|
+[source,groovy]
+----
+def url = "https://" + host + 
+    ":" + port + "/search?q=" +
+    URLEncoder.encode(query, "UTF-8")
+----
+|
+[source,groovy]
+----
+def url = new URLBuilder(host)
+    .port(port)
+    .path("/search")
+    .param("q", query)
+    .build()
+----
+|===
+
+*URLBuilder Advantages:*
+
+* Automatic encoding
+* Type safety
+* Readable and maintainable
+* Less error-prone
+
+=== vs. URIBuilder (Apache HttpClient)
+
+URLBuilder is simpler and Groovy-idiomatic:
+
+[cols="1a,1a"]
+|===
+|URIBuilder |URLBuilder
+
+|
+[source,groovy]
+----
+def builder = new URIBuilder()
+    .setScheme("https")
+    .setHost("api.example.com")
+    .setPath("/search")
+    .addParameter("q", "groovy")
+
+def url = builder.build().toString()
+----
+|
+[source,groovy]
+----
+def url = new URLBuilder("api.example.com")
+    .path("/search")
+    .param("q", "groovy")
+    .build()
+----
+|===
+
+*URLBuilder Advantages:*
+
+* No external dependencies
+* Groovy-friendly closure syntax
+* Simpler API
+* Natural array parameter handling
+
+== Best Practices
+
+=== Validate Required Parameters
+
+[source,groovy]
+----
+def buildUserUrl(String userId) {
+    Objects.requireNonNull(userId, "userId is required")
+    
+    new URLBuilder("api.example.com")
+        .path("/users/${userId}")
+        .build()
+}
+----
+
+=== Use Factory Methods
+
+[source,groovy]
+----
+class UrlFactory {
+    static String userUrl(String userId) {
+        new URLBuilder("api.example.com")
+            .path("/users/${userId}")
+            .build()
+    }
+    
+    static String searchUrl(String query, int limit = 10) {
+        new URLBuilder("api.example.com")
+            .path("/search")
+            .param("q", query)
+            .param("limit", limit)
+            .build()
+    }
+}
+
+// Usage
+def url = UrlFactory.searchUrl("groovy http client")
+----
+
+=== Document URL Structure
+
+[source,groovy]
+----
+/**
+ * Builds a paginated article list URL.
+ * 
+ * @param page Page number (1-based)
+ * @param pageSize Items per page  
+ * @param tags Optional tag filters
+ * @return Full URL with query parameters
+ */
+String buildArticleListUrl(int page, int pageSize, List<String> tags = []) {
+    def builder = new URLBuilder("api.example.com")
+        .path("/articles")
+        .param("page", page)
+        .param("per_page", pageSize)
+    
+    if (tags) {
+        builder.param("tags", tags)
+    }
+    
+    builder.build()
+}
+----
+
+== Next Steps
+
+Now that you understand URL construction, learn about:
+
+* <<groovy-http-client,GroovyHttpClient Deep Dive>> — Making requests with built URLs
+* <<multipart-uploads,Multipart Uploads>> — Sending files and form data
+* <<testing-mock-server,Testing with MockHttpServer>> — Mocking URL-based endpoints

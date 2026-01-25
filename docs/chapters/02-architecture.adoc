@@ -1,0 +1,76 @@
+[[architecture]]
+== Architecture & Design Patterns
+
+[[virtual-threads]]
+=== Virtual Threads Foundation
+
+The `GroovyHttpClient` is built on **Java 21+ virtual threads** (Project Loom), providing:
+
+[horizontal]
+Lightweight concurrency:: Millions of concurrent requests with minimal overhead
+Blocking-friendly:: Natural blocking APIs without thread pool exhaustion
+Structured concurrency:: Clean resource management
+
+[source,groovy]
+----
+ThreadFactory tf = Thread.ofVirtual()
+    .name("http-client-", counter)
+    .factory()
+
+executor = Executors.newThreadPerTaskExecutor(tf)
+----
+
+TIP: Virtual threads are perfect for I/O-bound operations like HTTP requests.
+
+[[design-patterns]]
+=== Key Design Patterns
+
+[[builder-pattern]]
+==== Builder Pattern
+
+The `SecurityConfig` and `URLBuilder` use fluent builders:
+
+[source,groovy]
+----
+def config = SecurityConfig.builder("https://api.example.com")
+    .connectTimeout(Duration.ofSeconds(5))
+    .allowRedirects(true)
+    .failureThreshold(3)
+    .build()
+----
+
+[[circuit-breaker-pattern]]
+==== Circuit Breaker Pattern
+
+Implements the circuit breaker pattern with three states:
+
+[plantuml, circuit-breaker-state, svg]
+----
+@startuml
+[*] --> CLOSED
+CLOSED --> OPEN : failures >= threshold
+OPEN --> HALF_OPEN : timeout elapsed
+HALF_OPEN --> CLOSED : success
+HALF_OPEN --> OPEN : failure
+@enduml
+----
+
+See <<circuit-breaker>> for details.
+
+[[interceptor-chain]]
+==== Interceptor Chain
+
+Supports middleware-style request/response interceptors:
+
+[source,groovy]
+----
+client.addInterceptor { ctx, next ->
+    println "Request: ${ctx.method} ${ctx.uri}"
+    next.call(ctx).thenApply { resp ->
+        println "Response: ${resp.statusCode}"
+        resp
+    }
+}
+----
+
+IMPORTANT: Interceptors execute in LIFO order (last added runs first).
