@@ -3,7 +3,8 @@
 A modern, production-ready HTTP client for Groovy and Java applications, built on Java's standard `HttpClient` API with **virtual threads**, comprehensive **security controls**, and a powerful **testing framework**.
 
 [![Java](https://img.shields.io/badge/Java-21+-blue.svg)](https://openjdk.org/projects/jdk/21/)
-[![Groovy](https://img.shields.io/badge/Groovy-4.0+-orange.svg)](https://groovy-lang.org/)
+[![Groovy](https://img.shields.io/badge/Groovy-5.0+-orange.svg)](https://groovy-lang.org/)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.woodmawa/groovy-httpclient.svg)](https://central.sonatype.com/artifact/io.github.woodmawa/groovy-httpclient)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
 ---
@@ -46,16 +47,16 @@ A modern, production-ready HTTP client for Groovy and Java applications, built o
 **Gradle:**
 ```groovy
 dependencies {
-    implementation 'org.softwood:groovy-HttpClient:1.5.0'
+    implementation 'io.github.woodmawa:groovy-httpclient:1.0.2'
 }
 ```
 
 **Maven:**
 ```xml
 <dependency>
-    <groupId>org.softwood</groupId>
-    <artifactId>groovy-HttpClient</artifactId>
-    <version>1.5.0</version>
+    <groupId>io.github.woodmawa</groupId>
+    <artifactId>groovy-httpclient</artifactId>
+    <version>1.0.2</version>
 </dependency>
 ```
 
@@ -64,7 +65,7 @@ dependencies {
 ```groovy
 import org.softwood.http.GroovyHttpClient
 
-// Create client
+// Create client, replace with real api endpoint of you choice 
 def client = new GroovyHttpClient("https://api.github.com")
 
 // Make GET request
@@ -88,6 +89,8 @@ def created = client.postSync("/users", null) {
 ### HTTP Methods
 
 ```groovy
+import java.util.concurrent.CompletableFuture
+
 // Synchronous requests
 def response = client.getSync("/resource")
 def response = client.postSync("/resource", body)
@@ -96,7 +99,7 @@ def response = client.patchSync("/resource", body)
 def response = client.deleteSync("/resource")
 
 // Asynchronous requests
-client.get("/resource").thenApply { response ->
+CompletableFuture res = client . get("/resource").thenApply { response ->
     println response.json
 }
 ```
@@ -192,6 +195,8 @@ def config = SecurityConfig.production("https://api.example.com")
 ### Custom Configuration
 
 ```groovy
+import org.softwood.http.GroovyHttpClient.RetryPolicy
+
 def config = SecurityConfig.production("https://api.example.com")
     .withOverrides([
         // Timeouts
@@ -374,6 +379,7 @@ try {
 
 ```groovy
 import org.softwood.http.GroovyHttpClient.RetryPolicy
+import org.softwood.http.SecurityConfig
 
 def retryPolicy = new RetryPolicy.Config()
     .maxAttempts(5)
@@ -480,7 +486,7 @@ Comprehensive documentation is available in the `docs/` directory:
 | Component | Version |
 |-----------|---------|
 | **Java** | 21 or higher (for virtual threads) |
-| **Groovy** | 4.0 or higher |
+| **Groovy** | 5.0 or higher |
 | **Build Tool** | Gradle 8+ or Maven 3.8+ |
 
 > **Note:** Virtual threads are production-ready in Java 21+. They were preview features in Java 19-20.
@@ -590,7 +596,7 @@ Contributions are welcome! Please:
 This project is licensed under the **Apache License 2.0** - see the [LICENSE](LICENSE) file for details.
 
 ```
-Copyright 2025 Softwood Consulting Ltd
+Copyright 2025 William Woodman
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -619,10 +625,10 @@ limitations under the License.
 ## 📞 Support
 
 - **Documentation**: See `docs/` directory or build with `./gradlew asciidoctor`
-- **Issues**: [GitHub Issues](https://github.com/softwood/groovy-HttpClient/issues)
-- **Email**: will@softwood.org
-- **Source**: [GitHub Repository](https://github.com/softwood/groovy-HttpClient)
+- **Issues**: [GitHub Issues](https://github.com/woodmawa/groovy-HttpClient/issues)
+- **Email**: will.woodman.softwood@outlook.com
+- **Source**: [GitHub Repository](https://github.com/woodmawa/groovy-HttpClient)
 
 ---
 
-**Made with ❤️ by Softwood Consulting Ltd**
+**Made with ❤️ by William Woodman**
