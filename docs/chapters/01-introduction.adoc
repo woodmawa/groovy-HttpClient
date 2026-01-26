@@ -80,12 +80,28 @@ dependencies {
 
 Create a client and make your first request:
 
+if you want to just try out with a public REST endpoint you can try https://restful-api.dev/  which has a list of resources and expected responses if you open that site with a browser.
+
+When you create a 'new GroovyHttpClient ("https://<baseUrl>")',  this internally creates a SecurityConfig for you using SecurityConfig.testing(baseUrl).  This is usually fine to get started, but you'll normally want to select from the SecurityConfig static methods or use the SecurityConfig builder for full control of the security permissions for your endpoint
+
+Both synchronous and asynchronous http method calls are supported, and return
+an HttpClientResponse or CompletableFuture<HttpClientResponse>  as return value
+
 [source,groovy]
 ----
 import org.softwood.http.GroovyHttpClient
 
 // Simple client with testing defaults
+// dummy endpoint - replace with your chosen base URL
 def client = new GroovyHttpClient("https://api.example.com")
+
+/** this is equivalent to
+ * SecurityConfig conf = SecurityConfig.testing("https://api.example.com")
+ * GroovyHttpClient gc = new GroovyHttpClient(conf)
+ *
+ * For production its best to build the full SecurityConfig instance for your needs
+ * and pass that for the constructor
+ **/
 
 // Make a GET request
 def response = client.getSync("/users/123")
@@ -138,9 +154,9 @@ Provides real-world examples, troubleshooting guidance, and API reference materi
 
 [horizontal]
 Documentation:: This guide and inline Javadoc/GroovyDoc
-Source Code:: link:https://github.com/softwood/groovy-HttpClient[github.com/softwood/groovy-HttpClient]
-Issue Tracking:: link:https://github.com/softwood/groovy-HttpClient/issues[GitHub Issues]  
-Email Support:: will@softwood.org
+Source Code:: link:https://github.com/woodmawa/groovy-HttpClient[github.com/woodmawa/groovy-HttpClient]
+Issue Tracking:: link:https://github.com/woodmawa/groovy-HttpClient/issues[GitHub Issues]
+Email Support:: will.woodman.softwood@outlook.com
 
 TIP: The source code is extensively commented and can serve as additional documentation.
 

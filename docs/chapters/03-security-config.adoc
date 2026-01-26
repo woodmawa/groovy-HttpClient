@@ -5,6 +5,10 @@
 
 The `SecurityConfig` class is the cornerstone of the Groovy HTTP Client's security model. It provides a declarative, environment-aware approach to configuring TLS policies, timeout controls, SSRF protection, cookie handling, and resilience patterns.
 
+Users should assess the SecurityConfig static methods or use the builder to create an explicit security config for their endpoint for production code, and create your GroovyHttpClient with that config in the constructor
+
+Just creating a GrooyHttpClient using the base string only internally sets up the testing defaults, so its normally expected for a user to consider their needs and create the correct SecurityConfiguration for them or use one of the preset factory static methods
+
 [IMPORTANT]
 ====
 Security is not an add-on in this library—it's baked into the foundation. Every `GroovyHttpClient` instance requires a `SecurityConfig`, ensuring security decisions are explicit and auditable.

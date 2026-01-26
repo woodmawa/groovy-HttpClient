@@ -9,7 +9,7 @@ plugins {
 }
 
 group = 'io.github.woodmawa'  // Or 'io.github.woodmawa' if using GitHub-based group
-version = '1.0.0'  // Use 1.5.0-SNAPSHOT for development, 1.5.0 for release
+version = '1.0.0'  // Use 1.0.0-SNAPSHOT for development, 1.0.0 for release
 
 repositories {
     mavenCentral()
