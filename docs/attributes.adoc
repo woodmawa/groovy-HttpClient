@@ -1,11 +1,12 @@
 // Document attributes
 :project-name: Groovy HTTP Client
-:project-version: 1.0.2
+// {version} is passed by the Gradle asciidoctor tasks (project.version); index.adoc holds a local fallback
+:project-version: {version}
 :project-group: io.github.woodmawa
 :project-artifact: groovy-httpclient
 
 // API Documentation
-:javadoc-url: https://docs.oracle.com/en/java/javase/21/docs/api
+:javadoc-url: https://docs.oracle.com/en/java/javase/25/docs/api
 :groovy-url: https://groovy-lang.org/documentation.html
 
 // Code highlighting
@@ -29,11 +30,13 @@
 ifdef::backend-html5[]
 :badge-virtual-threads: image:https://img.shields.io/badge/Java-Virtual_Threads-blue[]
 :badge-http2: image:https://img.shields.io/badge/HTTP-2.0-green[]
-:badge-groovy: image:https://img.shields.io/badge/Groovy-4.0+-orange[]
+:badge-groovy: image:https://img.shields.io/badge/Groovy-6.0+-orange[]
+:badge-java: image:https://img.shields.io/badge/Java-25+-blue[]
 endif::[]
 
 ifdef::backend-pdf[]
 :badge-virtual-threads: *Java Virtual Threads*
 :badge-http2: *HTTP/2*
-:badge-groovy: *Groovy 4.0+*
+:badge-groovy: *Groovy 6.0+*
+:badge-java: *Java 25+*
 endif::[]

@@ -1,7 +1,7 @@
 [[introduction]]
 = Introduction
 
-{badge-virtual-threads} {badge-http2} {badge-groovy}
+{badge-java} {badge-virtual-threads} {badge-http2} {badge-groovy}
 
 == Overview
 
@@ -36,7 +36,8 @@ Traditional HTTP clients often require choosing between ease of use and performa
 * *Virtual thread executor* for ultra-lightweight concurrency
 * *Request/response interceptors* for logging, metrics, and custom processing
 * *Comprehensive security model* via `SecurityConfig` profiles
-* *SSRF protection* with host allow-listing
+* *SSRF protection* with host allow-listing, enforced on every redirect hop
+* *Bounded responses* -- downloads are cut off as soon as `maxResponseBytes` is crossed
 * *HTTP/2 support* with automatic protocol negotiation
 
 ==== Testing Features
@@ -55,16 +56,19 @@ Traditional HTTP clients often require choosing between ease of use and performa
 |Requirement |Version
 
 |Java
-|21 or higher (for virtual threads)
+|25 or higher (the library is compiled to Java 25 bytecode; tested on JDK 25 and JDK 27)
 
-|Groovy  
-|5.0 or higher (tested with 5.0.4)
+|Groovy
+|6.0 or higher (tested with 6.0.0)
 
 |Build Tool
 |Gradle 9+ or Maven 3.8+
+
+|Logging
+|Any SLF4J 2.x binding (the library depends on `slf4j-api` only)
 |===
 
-NOTE: Virtual threads are a preview feature in Java 19-20 and production-ready in Java 21+.
+NOTE: From 2.0.0 the library no longer brings `logback-classic` with it. Add the SLF4J binding your application uses.
 
 === Quick Start
 
@@ -82,7 +86,9 @@ Create a client and make your first request:
 
 if you want to just try out with a public REST endpoint you can try https://restful-api.dev/  which has a list of resources and expected responses if you open that site with a browser.
 
-When you create a 'new GroovyHttpClient ("https://<baseUrl>")',  this internally creates a SecurityConfig for you using SecurityConfig.testing(baseUrl).  This is usually fine to get started, but you'll normally want to select from the SecurityConfig static methods or use the SecurityConfig builder for full control of the security permissions for your endpoint
+When you create a `new GroovyHttpClient("https://<baseUrl>")`, the client uses `SecurityConfig.defaults(baseUrl)`: certificates and host names are verified, absolute URLs are refused, redirects are followed only to allowed hosts and nothing is retried automatically. That is a safe place to start. Pick another `SecurityConfig` profile, or use `GroovyHttpClient.builder(...)`, when you need different behaviour (see <<security-config>>).
+
+IMPORTANT: Before 2.0.0 this constructor used the `testing()` profile, which accepted any TLS certificate. See <<upgrading-2>>.
 
 Both synchronous and asynchronous http method calls are supported, and return
 an HttpClientResponse or CompletableFuture<HttpClientResponse>  as return value
@@ -91,17 +97,16 @@ an HttpClientResponse or CompletableFuture<HttpClientResponse>  as return value
 ----
 import org.softwood.http.GroovyHttpClient
 
-// Simple client with testing defaults
+// Client with safe defaults (verified TLS)
 // dummy endpoint - replace with your chosen base URL
 def client = new GroovyHttpClient("https://api.example.com")
 
-/** this is equivalent to
- * SecurityConfig conf = SecurityConfig.testing("https://api.example.com")
- * GroovyHttpClient gc = new GroovyHttpClient(conf)
+/* equivalent to:
+ *   new GroovyHttpClient(SecurityConfig.defaults("https://api.example.com"))
  *
- * For production its best to build the full SecurityConfig instance for your needs
- * and pass that for the constructor
- **/
+ * For production, choose SecurityConfig.production(...) or build exactly the
+ * configuration you need with GroovyHttpClient.builder(...)
+ */
 
 // Make a GET request
 def response = client.getSync("/users/123")
@@ -148,7 +153,7 @@ Covers the architecture, security model, core client features, and multipart upl
 Describes the `MockHttpServer`, `HttpClientTestDsl`, and `HttpClientTestTrait` for comprehensive HTTP testing. Essential reading for writing robust tests.
 
 *Examples & Reference* (Chapters 11-12)::
-Provides real-world examples, troubleshooting guidance, and API reference material.
+Provides real-world examples and the guide to upgrading from 1.x (<<upgrading-2>>).
 
 === Getting Help
 

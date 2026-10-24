@@ -38,7 +38,7 @@ dependencies {
     implementation libs.groovy.xml
     implementation libs.slf4j.api
     // D-1: a library must not pick the logging backend for its consumers
-    testRuntimeOnly libs.logback.classic
+    testImplementation libs.logback.classic   // tests capture log output with ListAppender
 
     testImplementation libs.spock.core
     testImplementation platform(libs.junit.bom)

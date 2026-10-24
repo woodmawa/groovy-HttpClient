@@ -2,17 +2,32 @@
 
 A modern, production-ready HTTP client for Groovy and Java applications, built on Java's standard `HttpClient` API with **virtual threads**, comprehensive **security controls**, and a powerful **testing framework**.
 
-[![Java](https://img.shields.io/badge/Java-21+-blue.svg)](https://openjdk.org/projects/jdk/21/)
-[![Groovy](https://img.shields.io/badge/Groovy-5.0+-orange.svg)](https://groovy-lang.org/)
+[![Java](https://img.shields.io/badge/Java-25+-blue.svg)](https://openjdk.org/projects/jdk/25/)
+[![Groovy](https://img.shields.io/badge/Groovy-6.0+-orange.svg)](https://groovy-lang.org/)
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.woodmawa/groovy-httpclient.svg)](https://central.sonatype.com/artifact/io.github.woodmawa/groovy-httpclient)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+
+---
+
+## What's new in 2.0
+
+2.0.0 requires **Java 25+** and **Groovy 6**, and fixes the findings of a security review of 1.0.2. Several defaults change. **Read the [upgrade guide](docs/chapters/12-upgrading-2.0.adoc) before upgrading.**
+
+- `new GroovyHttpClient(url)` now **verifies TLS certificates**. In 1.x it accepted any certificate.
+- Redirects are checked against `allowedHosts` on every hop, never downgrade HTTPS to HTTP, and drop credentials when the origin changes.
+- `maxResponseBytes` is enforced while the body streams in, not after it is fully buffered.
+- `allowRedirects(false)` and other explicit `false`/`0` settings now take effect.
+- 5xx retries work; POST/PATCH are retried only with `retryNonIdempotent(true)`.
+- `*Sync` methods throw the real exception (`HttpResponseException`, ...) instead of `ExecutionException`.
+- Cookie and multipart header values are validated; per-request `timeout(...)` works; `enableLogging` logs credential-safe request lines.
+- No bundled logging backend: add your own SLF4J binding.
 
 ---
 
 ## 🚀 Key Features
 
 ### **Modern Architecture**
-- **Virtual Thread Executor** — Handle millions of concurrent requests with minimal overhead (Java 21+)
+- **Virtual Thread Executor** — Handle millions of concurrent requests with minimal overhead
 - **HTTP/2 Support** — Automatic protocol negotiation with multiplexing
 - **Zero Magic** — Wraps Java's standard `HttpClient` — no reflection, no bytecode manipulation
 
@@ -27,8 +42,10 @@ A modern, production-ready HTTP client for Groovy and Java applications, built o
 - **Request/Response Interceptors** — Logging, metrics, and custom processing
 
 ### **Security by Default**
-- **Environment-Aware Profiles** — `testing()`, `development()`, `production()` configurations
-- **SSRF Protection** — Host allow-listing and absolute URL controls
+- **Verified TLS by default** — only the explicitly named `trustAll()` profile skips certificate checks
+- **Environment-Aware Profiles** — `defaults()`, `production()`, `staging()`, `testing()`, `trustAll()`
+- **SSRF Protection** — Host allow-listing for absolute URLs *and every redirect hop*
+- **Bounded Responses** — downloads cancelled as soon as `maxResponseBytes` is crossed
 - **TLS Configuration** — Custom trust stores, hostname verification, protocol selection
 - **Configurable Timeouts** — Connect, request, and synchronous operation limits
 
@@ -47,7 +64,8 @@ A modern, production-ready HTTP client for Groovy and Java applications, built o
 **Gradle:**
 ```groovy
 dependencies {
-    implementation 'io.github.woodmawa:groovy-httpclient:1.0.2'
+    implementation 'io.github.woodmawa:groovy-httpclient:2.0.0'
+    runtimeOnly 'ch.qos.logback:logback-classic:1.6.5'   // or any SLF4J binding
 }
 ```
 
@@ -56,7 +74,7 @@ dependencies {
 <dependency>
     <groupId>io.github.woodmawa</groupId>
     <artifactId>groovy-httpclient</artifactId>
-    <version>1.0.2</version>
+    <version>2.0.0</version>
 </dependency>
 ```
 
@@ -65,7 +83,7 @@ dependencies {
 ```groovy
 import org.softwood.http.GroovyHttpClient
 
-// Create client, replace with real api endpoint of you choice 
+// Create a client (verified TLS, safe defaults); replace with the API endpoint of your choice
 def client = new GroovyHttpClient("https://api.github.com")
 
 // Make GET request
@@ -181,15 +199,22 @@ new File("downloaded.pdf").bytes = fileData
 import org.softwood.http.SecurityConfig
 import org.softwood.http.GroovyHttpClient
 
-// Testing - Trust all SSL, permissive settings
-def config = SecurityConfig.testing("http://localhost:8080")
-def client = new GroovyHttpClient(config)
+// Defaults - what new GroovyHttpClient(url) uses: verified TLS, no absolute URLs, no retries
+def defaults = SecurityConfig.defaults("https://api.example.com")
 
-// Development - Relaxed timeouts, detailed logging
-def config = SecurityConfig.development("https://dev-api.example.com")
+// Production - TLS 1.3 only, tighter timeouts, retries of idempotent requests
+def prod = SecurityConfig.production("https://api.example.com")
 
-// Production - Strict security, optimized settings
-def config = SecurityConfig.production("https://api.example.com")
+// Staging - production plus request logging
+def staging = SecurityConfig.staging("https://staging-api.example.com")
+
+// Testing - local/mock servers: absolute URLs, all cookies; certificates STILL verified
+def test = SecurityConfig.testing("http://localhost:8080")
+
+// Trust-all - disables certificate checks. Local debugging only.
+def unsafe = SecurityConfig.trustAll("https://localhost:8443")
+
+def client = new GroovyHttpClient(prod)
 ```
 
 ### Custom Configuration
@@ -207,20 +232,21 @@ def config = SecurityConfig.production("https://api.example.com")
         failureThreshold: 5,
         resetTimeoutMs: 30_000,
         
-        // SSRF Protection
-        allowedHosts: ["api.example.com", "cdn.example.com"],
+        // SSRF Protection (also applied to every redirect hop)
+        allowedHosts: ["api.example.com", "cdn.example.com"] as Set,
         allowAbsoluteUrls: false,
+        maxRedirects: 3,
         
         // TLS
         allowedTlsProtocols: ["TLSv1.3"],
         enforceHostnameVerification: true,
         
-        // Retry Policy
-        retryPolicy: new RetryPolicy.Config()
-            .maxAttempts(3)
-            .backoffExponential(200, 2000, true)
-            .on5xx(true)
-            .build()
+        // Retry Policy (idempotent methods; add retryNonIdempotent(true) for POST/PATCH)
+        retryPolicy: new RetryPolicy.Config().tap {
+            maxAttempts(3)
+            backoffExponential(200, 2000, true)
+            on5xx(true)
+        }.build()
     ])
 
 def client = new GroovyHttpClient(config)
@@ -381,20 +407,20 @@ try {
 import org.softwood.http.GroovyHttpClient.RetryPolicy
 import org.softwood.http.SecurityConfig
 
-def retryPolicy = new RetryPolicy.Config()
-    .maxAttempts(5)
-    .backoffExponential(200, 10_000, true)  // 200ms to 10s with jitter
-    .onTimeouts(true)
-    .on5xx(true)
-    .onIoExceptions(true)
-    .build()
+def retryPolicy = new RetryPolicy.Config().tap {
+    maxAttempts(5)
+    backoffExponential(200, 10_000, true)  // 200ms to 10s with jitter
+    onTimeouts(true)
+    on5xx(true)
+    onIoExceptions(true)
+}.build()
 
 def config = SecurityConfig.production("https://api.example.com")
     .withOverrides([retryPolicy: retryPolicy])
 
 def client = new GroovyHttpClient(config)
 
-// Automatically retries on failures
+// GET is retried automatically; POST/PATCH only if the policy says retryNonIdempotent(true)
 def response = client.getSync("/flaky-endpoint")
 ```
 
@@ -411,23 +437,20 @@ client.addInterceptor { ctx, next ->
         if (error) {
             println "✗ Failed after ${elapsed}ms: ${error.message}"
         } else {
-            println "✓ ${response.statusCode} in ${elapsed}ms"
+            println "✓ ${response.statusCode} in ${elapsed}ms"   // 4xx/5xx arrive here as responses
         }
     }
 }
 
-// Add authentication interceptor
-client.addInterceptor { ctx, next ->
-    ctx.builder.header("Authorization", "Bearer ${getToken()}")
-    next.call(ctx)
-}
+// Authentication: a default header is simplest (dropped automatically on cross-origin redirects)
+client.setHeader("Authorization", "Bearer ${getToken()}")
 ```
 
 ---
 
 ## ⚡ Virtual Threads
 
-Built on **Java 21 virtual threads** for efficient, scalable concurrency:
+Built on **virtual threads** for efficient, scalable concurrency:
 
 ```groovy
 // Launch thousands of concurrent requests
@@ -489,7 +512,7 @@ Comprehensive documentation is available in the `docs/` directory:
 | **Groovy** | 5.0 or higher |
 | **Build Tool** | Gradle 8+ or Maven 3.8+ |
 
-> **Note:** Virtual threads are production-ready in Java 21+. They were preview features in Java 19-20.
+> **Note:** 2.0 requires Java 25+. It is built and tested on JDK 25 and JDK 27.
 
 ---
 

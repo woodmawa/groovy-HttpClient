@@ -322,21 +322,16 @@ def baseUrl = new URLBuilder("api.github.com")
 
 def client = new GroovyHttpClient(baseUrl)
 
-// Build complex search URL
-def searchPath = new URLBuilder()
-    .path("/search/repositories")
-    .param("q", "language:groovy")
-    .param("sort", "stars")
-    .param("order", "desc")
-    .param("per_page", 10)
-    .build()
-    .replaceFirst("https?://[^/]+", "")  // Extract just the path+query
-
-def response = client.getSync(searchPath)
+// Requests relative to the base URL: let the client encode the query
+def response = client.getSync("/search/repositories") {
+    query(q: "language:groovy", sort: "stars", order: "desc", per_page: 10)
+}
 def repos = response.json.items
 ----
 
-TIP: For simple cases, use `GroovyHttpClient`'s built-in query DSL. For complex URL construction, use URLBuilder.
+TIP: For requests to the client's own base URL, use the request DSL's `query(...)`, which keeps the request on the configured host. Use URLBuilder to build the base URL itself, or absolute URLs to other allowed hosts (below).
+
+NOTE: `URLBuilder.build()` requires a host. A host-less builder throws `IllegalStateException`, so don't use it to build path-only strings.
 
 === Using with Absolute URLs
 
@@ -361,7 +356,7 @@ def bytes = client.downloadBytesSync(url)
 
 == Character Encoding
 
-URLBuilder uses UTF-8 encoding for all parameters:
+URLBuilder encodes query parameter names and values as UTF-8. `host` and `path` are used exactly as given:
 
 [source,groovy]
 ----
@@ -410,6 +405,13 @@ Common special characters are handled correctly:
 |`#section`
 |`%23section`
 |===
+
+The table applies to query parameters only.
+
+[WARNING]
+====
+Don't build `path` from untrusted input without validating or encoding each segment. A value such as `../admin`, or one containing `?` or `#`, would change the request. Encode a single segment with `URLEncoder.encode(segment, 'UTF-8').replace('+', '%20')`.
+====
 
 == Error Handling
 

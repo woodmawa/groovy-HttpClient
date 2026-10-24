@@ -5,9 +5,9 @@
 
 The `SecurityConfig` class is the cornerstone of the Groovy HTTP Client's security model. It provides a declarative, environment-aware approach to configuring TLS policies, timeout controls, SSRF protection, cookie handling, and resilience patterns.
 
-Users should assess the SecurityConfig static methods or use the builder to create an explicit security config for their endpoint for production code, and create your GroovyHttpClient with that config in the constructor
+`new GroovyHttpClient("https://...")` uses `SecurityConfig.defaults(baseUrl)`, which is safe to use as-is: verified TLS, no absolute URLs, policy-checked redirects and no automatic retries. For production code, choose the profile that matches your environment (or build exactly what you need with `GroovyHttpClient.builder(...)`) and pass it to the constructor, so the decision is visible in your code.
 
-Just creating a GrooyHttpClient using the base string only internally sets up the testing defaults, so its normally expected for a user to consider their needs and create the correct SecurityConfiguration for them or use one of the preset factory static methods
+NOTE: Before 2.0.0 the String constructor used the `testing()` profile, which accepted any certificate. See <<upgrading-2>>.
 
 [IMPORTANT]
 ====
@@ -25,7 +25,32 @@ Security is not an add-on in this library—it's baked into the foundation. Ever
 
 == Configuration Profiles
 
-`SecurityConfig` provides four built-in profiles optimized for different environments.
+`SecurityConfig` provides five built-in profiles optimized for different environments.
+
+.Profiles at a glance
+[cols="1,1,1,1,1,1"]
+|===
+|Profile |Certificates verified |TLS |Absolute URLs |Automatic retry |Use for
+
+|`defaults()`   |yes |1.3, 1.2 |no  |none |the String constructor; general use
+|`production()` |yes |1.3      |no  |idempotent methods, 3 attempts |production services
+|`staging()`    |yes |1.3      |no  |as production |pre-production, with logging
+|`testing()`    |yes (optionally against your own `SSLContext`) |1.3, 1.2 |yes, to allowed hosts |none |tests against local / mock servers
+|`trustAll()`   |*no* |1.3, 1.2 |yes, to allowed hosts |idempotent methods, 2 attempts |local debugging only
+|===
+
+=== Default Profile
+
+Used by `new GroovyHttpClient(baseUrl)`:
+
+[source,groovy]
+----
+def client = new GroovyHttpClient("https://api.example.com")
+// same as
+def client2 = new GroovyHttpClient(SecurityConfig.defaults("https://api.example.com"))
+----
+
+Certificates and host names are verified against the JVM trust store, TLS 1.3 and 1.2 are allowed, absolute URLs are refused, cookies are accepted only from the original server, redirects are followed (up to 5 hops) only to allowed hosts, responses are capped at 10 MB, and nothing is retried automatically.
 
 === Production Profile
 
@@ -80,11 +105,11 @@ def client = new GroovyHttpClient(config)
 |Circuit breaker sensitivity
 
 |`retryPolicy`
-|Enabled (3 attempts)
-|Automatic recovery from transient failures
+|Enabled (3 attempts) for idempotent methods
+|Automatic recovery from I/O errors, timeouts and 5xx, without re-sending POST or PATCH
 |===
 
-WARNING: Production profiles disable all "trust-all" TLS modes. Self-signed certificates will fail unless properly imported into the JVM truststore.
+WARNING: Production profiles never trust unverified certificates. A server with a private-CA or self-signed certificate needs that CA in the JVM trust store, or an `SSLContext` built from it: `withOverrides(sslContext: myContext)`.
 
 === Staging Profile
 
@@ -104,14 +129,23 @@ TIP: Use staging profiles to validate security policies before production deploy
 
 === Testing Profile
 
-The testing profile relaxes security controls for unit and integration tests:
+The testing profile relaxes host and cookie rules for unit and integration tests, but still verifies TLS certificates:
 
 [source,groovy]
 ----
 def config = SecurityConfig.testing("http://localhost:8080")
-
-// Client can now accept self-signed certs, absolute URLs, etc.
 def client = new GroovyHttpClient(config)
+
+// HTTPS test server with a self-signed certificate: trust exactly that certificate
+SSLContext testTls = SSLContext.getInstance("TLS")
+testTls.init(null, TrustManagerFactory.getInstance("PKIX").with {
+    def ks = KeyStore.getInstance("PKCS12")
+    new File("src/test/resources/test-truststore.p12").withInputStream { ks.load(it, "changeit".toCharArray()) }
+    init(ks)
+    trustManagers
+}, null)
+
+def tlsClient = new GroovyHttpClient(SecurityConfig.testing("https://localhost:8443", testTls))
 ----
 
 .Testing Profile Settings
@@ -120,10 +154,10 @@ def client = new GroovyHttpClient(config)
 |Property |Value
 
 |`insecureAllowed`
-|`true` — Accepts self-signed certificates
+|`false` — certificates are verified (pass an `SSLContext` to trust a test certificate)
 
 |`allowAbsoluteUrls`
-|`true` — Can call any host
+|`true` — absolute URLs are accepted, but only to hosts in `allowedHosts` (by default the base URL's host)
 
 |`cookiePolicy`
 |`ACCEPT_ALL` — Simplified cookie handling
@@ -140,7 +174,7 @@ def client = new GroovyHttpClient(config)
 
 [CAUTION]
 ====
-*Never use testing profiles in production.* They disable critical security controls and can expose your application to attacks.
+*Don't use the testing profile in production.* It accepts cookies from any server and does no retries. (Before 2.0.0 it also accepted any certificate; it no longer does.)
 ====
 
 === Trust-All Profile
@@ -155,9 +189,9 @@ def config = SecurityConfig.trustAll("http://localhost:3000")
 This profile disables:
 
 * TLS certificate validation
-* Hostname verification  
-* Host allow-listing
-* Most timeout enforcement
+* Hostname verification
+
+It is the *only* profile that does. Host allow-listing still applies: absolute URLs and redirects can only reach hosts in `allowedHosts`. A WARN is logged whenever a client is built with it.
 
 [WARNING]
 ====
@@ -172,7 +206,7 @@ It must never be used in production, staging, or any network-accessible environm
 
 == Custom Configuration
 
-All profiles can be customized using `withOverrides()`:
+All profiles can be customized using `withOverrides()`. An explicitly supplied value always wins, including `false` and `0` (before 2.0.0, `allowRedirects: false` and `enableMetrics: false` were silently ignored). Overriding `baseUrl` without supplying `allowedHosts` re-derives the allow-list from the new host:
 
 [source,groovy]
 ----
@@ -206,12 +240,28 @@ def config = SecurityConfig.production("https://api.example.com")
 
 |`maxResponseBytes`
 |`Long`
-|Maximum response body size (DoS protection)
+|Maximum response body size. The download is cancelled as soon as it is crossed and `HttpResponseException` with status 413 is raised. Must be > 0; use `Long.MAX_VALUE` for no limit.
 
 |`allowRedirects`
 |`Boolean`
-|Follow HTTP redirects automatically
+|Follow redirects. When `false`, the 3xx response is returned to you.
+
+|`maxRedirects`
+|`Integer`
+|Maximum redirect hops (default 5); more raises `RedirectRejectedException`
 |===
+
+[[redirect-policy]]
+=== Redirect Policy
+
+Redirects are followed by the client itself, never by the JDK, so every hop is checked:
+
+* the target host must be in `allowedHosts` (the base URL's host is always included);
+* only `http` and `https` targets are followed, and HTTPS is never downgraded to HTTP;
+* `Authorization`, `Proxy-Authorization` and `Cookie` headers are dropped when the redirect changes scheme, host or port;
+* `303`, and `301`/`302` after a `POST`, are followed as `GET` without a body; `307` and `308` keep the method and body.
+
+A refused redirect raises `GroovyHttpClient.RedirectRejectedException`.
 
 .Security Settings
 [cols="2,2,3"]
@@ -234,13 +284,52 @@ def config = SecurityConfig.production("https://api.example.com")
 |`List<String>`
 |Permitted cipher suites (empty = JVM defaults)
 
+|`trustStore`
+|`KeyStore`
+|Trust exactly these certificates (private CA, self-signed server) with full verification
+
+|`trustManagers`
+|`TrustManager[]`
+|Alternative to `trustStore`
+
+|`keyManagers`
+|`KeyManager[]`
+|Client certificate(s) for mutual TLS; combine with `trustStore`, or omit it to trust the JVM defaults
+
+|`sslContext`
+|`SSLContext`
+|A complete SSLContext instead of the three settings above. Null = JVM default.
+|===
+
+None of the trust settings can be combined with `insecureAllowed`, and `sslContext` cannot be combined with the other three. Unknown setting names are refused with `IllegalArgumentException`.
+
+NOTE: `trustStore`, `trustManagers` and `keyManagers` take effect from 2.0.0. In 1.x they were silently ignored. See the SSL certificate guide in the repository for keystore recipes.
+
+[source,groovy]
+----
+// private CA + mutual TLS
+def client = GroovyHttpClient.builder("https://mtls.internal.example")
+        .trustStore(companyCaStore)
+        .keyManagers(clientCertKeyManagers)
+        .build()
+----
+
+.Security Settings (continued)
+[cols="2,2,3"]
+|===
+|Property |Type |Description
+
+|`enforceHostnameVerification`
+|`Boolean`
+|See above (repeated here for reference): keep `true` with custom trust material too
+
 |`allowAbsoluteUrls`
 |`Boolean`
 |Allow requests to absolute URLs outside `baseUrl`
 
 |`allowedHosts`
 |`Set<String>`
-|Host whitelist for SSRF protection
+|Host allow-list for SSRF protection, applied to absolute URLs and to every redirect hop. Matching is case-insensitive and ignores a trailing dot.
 
 |`cookiePolicy`
 |`CookiePolicy`
@@ -383,6 +472,8 @@ client.getSync("https://api.example.com/data")
 client.getSync("https://evil.com/steal-data")
 ----
 
+The same allow-list is applied to every redirect hop, so an allowed host cannot bounce the client somewhere else. See <<redirect-policy>>.
+
 [IMPORTANT]
 ====
 The `baseUrl` host is *automatically* added to `allowedHosts`. You only need to list additional trusted hosts.
@@ -439,7 +530,7 @@ def config = SecurityConfig.production("https://api.example.com")
 |Only accept cookies from the origin server (default for production)
 |===
 
-NOTE: The cookie policy works in conjunction with the automatic `CookieManager`. See <<groovy-http-client#cookies,Cookie Management>> for usage examples.
+NOTE: The cookie policy works in conjunction with the automatic `CookieManager`. See <<cookies,Cookie Management>> for usage examples.
 
 == Timeout Configuration
 
@@ -476,6 +567,17 @@ def config = SecurityConfig.production("https://api.example.com")
 * *Too Low*: Fails legitimate slow requests (large payloads, slow APIs)
 * *Too High*: Hung connections, cascading failures
 * *Recommended*: 20-60 seconds depending on use case
+
+A single request can override it from the DSL:
+
+[source,groovy]
+----
+client.getSync("/report") {
+    timeout(Duration.ofMinutes(2))   // this request only
+}
+----
+
+NOTE: Before 2.0.0 a per-request `timeout(...)` was silently ignored.
 
 [TIP]
 ====
@@ -537,7 +639,14 @@ def config = SecurityConfig.production("https://api.example.com")
 
 |`onStatusCodes(Collection<Integer>)`
 |Retry on specific status codes
+
+|`retryNonIdempotent(boolean)`
+|Also retry POST, PATCH and CONNECT. Off by default.
 |===
+
+Retries apply to idempotent methods only (GET, HEAD, OPTIONS, PUT, DELETE, TRACE) unless the policy calls `retryNonIdempotent(true)`. A POST whose response was lost may already have been processed by the server, and sending it again can duplicate the action.
+
+NOTE: Before 2.0.0, status-code retries (`on5xx`, `onStatusCodes`) never fired, and I/O and timeout retries applied to every method. Both are fixed in 2.0.0.
 
 === Retry Strategies
 
@@ -571,20 +680,28 @@ Override retry policy for specific requests:
 
 [source,groovy]
 ----
-client.post("/critical-operation", data) {
+client.get("/report") {
     retry {
         maxAttempts(5)
         backoffExponential(500, 10000, true)
         on5xx(true)
     }
 }
+
+// A POST is retried only with an explicit opt-in -- pair it with an idempotency key
+client.post("/payments", payload) {
+    header("Idempotency-Key", UUID.randomUUID().toString())
+    retry {
+        maxAttempts(3)
+        on5xx(true)
+        retryNonIdempotent(true)
+    }
+}
 ----
 
 [WARNING]
 ====
-Be cautious with retries on non-idempotent operations (POST, PATCH). Retrying can result in duplicate actions (double-charging, duplicate records, etc.).
-
-Consider implementing idempotency tokens for non-GET requests that need retries.
+Only opt in with `retryNonIdempotent(true)` when the server de-duplicates repeated requests (for example by an `Idempotency-Key`). Otherwise a retry can double-charge or create duplicate records.
 ====
 
 == Circuit Breaker Configuration
@@ -627,8 +744,10 @@ HALF_OPEN --> OPEN : Probe fails
 |Circuit tripped. All requests immediately fail. No calls to downstream service.
 
 |*HALF_OPEN*
-|Testing phase. Single probe request sent. Success → CLOSED, Failure → OPEN.
+|Testing phase. Exactly one probe request is let through; every other caller gets `CircuitOpenException` until it resolves. Success → CLOSED, Failure → OPEN.
 |===
+
+NOTE: Before 2.0.0, HALF_OPEN let every caller through at once.
 
 === Tuning Guidance
 
@@ -663,7 +782,7 @@ def config = SecurityConfig.production("https://api.example.com")
     ])
 ----
 
-Requests exceeding this limit throw `HttpResponseException` with status 413:
+The client counts bytes as the body arrives and cancels the download as soon as the limit is crossed, so an oversized or endless response never ends up in memory. The request fails with `HttpResponseException` and status 413 (a locally generated status -- the server sent whatever it sent):
 
 [source,groovy]
 ----
@@ -699,15 +818,18 @@ def config = SecurityConfig.production("https://api.example.com")
     ])
 ----
 
-Logs include:
+Each request logs one INFO line with the method, URL, status, elapsed time and attempt number. Retries and followed redirects also get a line each. For example:
 
-* Request method, URL, headers
-* Response status, headers, body (truncated for large responses)
-* Request timing
-* Retry attempts
-* Circuit breaker state changes
+----
+[GroovyHttpClient] GET https://api.example.com/users/42 -> 200 in 38 ms (attempt 1)
+----
 
-NOTE: Logging uses SLF4J. Configure your logging framework (Logback, Log4j2) to control output.
+[IMPORTANT]
+====
+Logged URLs omit the query string and any user-info, and headers and bodies are never logged, because all of these routinely carry credentials and tokens. (Before 2.0.0, `enableLogging` had no effect.)
+====
+
+NOTE: Logging uses SLF4J under the logger name `org.softwood.http.GroovyHttpClient`. The library ships no logging backend -- configure yours (Logback, Log4j2) to control output.
 
 === Metrics
 

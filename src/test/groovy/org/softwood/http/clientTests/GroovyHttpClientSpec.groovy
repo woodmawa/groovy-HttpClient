@@ -190,10 +190,9 @@ class GroovyHttpClientSpec extends Specification {
         client.getSync("/api/error")
 
         then:
-        def ex = thrown(ExecutionException)
-        ex.cause instanceof GroovyHttpClient.HttpResponseException
-        def cause = ex.cause as GroovyHttpClient.HttpResponseException
-        cause.message.contains('HTTP error: 500')
+        def ex = thrown(GroovyHttpClient.HttpResponseException)
+        ex.statusCode == 500
+        ex.responseBody == '{"error":"fail"}'
 
         cleanup:
         mockServer.shutdown()

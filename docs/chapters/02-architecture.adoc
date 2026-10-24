@@ -4,7 +4,7 @@
 [[virtual-threads]]
 === Virtual Threads Foundation
 
-The `GroovyHttpClient` is built on **Java 21+ virtual threads** (Project Loom), providing:
+The `GroovyHttpClient` is built on **virtual threads** (Java 25+ required by this library), providing:
 
 [horizontal]
 Lightweight concurrency:: Millions of concurrent requests with minimal overhead
@@ -28,15 +28,18 @@ TIP: Virtual threads are perfect for I/O-bound operations like HTTP requests.
 [[builder-pattern]]
 ==== Builder Pattern
 
-The `SecurityConfig` and `URLBuilder` use fluent builders:
+`GroovyHttpClient` and `URLBuilder` use fluent builders; `SecurityConfig` uses profiles plus `withOverrides`:
 
 [source,groovy]
 ----
-def config = SecurityConfig.builder("https://api.example.com")
+def client = GroovyHttpClient.builder("https://api.example.com")
     .connectTimeout(Duration.ofSeconds(5))
     .allowRedirects(true)
     .failureThreshold(3)
     .build()
+
+def config = SecurityConfig.production("https://api.example.com")
+    .withOverrides(failureThreshold: 3)
 ----
 
 [[circuit-breaker-pattern]]
@@ -73,4 +76,4 @@ client.addInterceptor { ctx, next ->
 }
 ----
 
-IMPORTANT: Interceptors execute in LIFO order (last added runs first).
+IMPORTANT: Interceptors run in the order they were added: the first added is outermost, so it sees the request first and the response last.

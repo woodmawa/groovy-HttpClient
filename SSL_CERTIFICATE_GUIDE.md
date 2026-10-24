@@ -26,6 +26,8 @@ GroovyHttpClient supports custom SSL/TLS configurations through Java keystores a
 - **Self-signed certificates** — Development and testing environments
 - **Corporate proxy certificates** — Enterprise SSL inspection
 
+> **Version note (2.0.0):** the `trustStore`, `trustManagers` and `keyManagers` settings used in this guide take effect from **2.0.0**. In 1.x they were silently ignored and the JVM default trust store was used, so private-CA and mutual-TLS configurations shown here did not work. From 2.0.0, `SecurityConfig` also refuses unknown setting names, so a misspelt key fails instead of being ignored. `GroovyHttpClient.builder(url)` offers the same as `.trustStore(ks)`, `.keyManagers(kms)` and `.sslContext(ctx)`. There is no `development()` profile: use `testing()` (verified TLS) with a trust store, or `trustAll()` for throwaway local debugging only.
+
 ### Key Concepts
 
 | Term | Description |
@@ -490,7 +492,7 @@ new FileInputStream(trustStorePath).withCloseable { fis ->
     trustStore.load(fis, trustStorePassword.toCharArray())
 }
 
-def config = SecurityConfig.development("https://localhost:8443")
+def config = SecurityConfig.testing("https://localhost:8443")
     .withOverrides([
         trustStore: trustStore,
         enforceHostnameVerification: false  // Development only!
@@ -669,7 +671,7 @@ keytool -exportcert \
 ```groovy
 def trustStore = loadTrustStore("dev-truststore.p12", "changeit")
 
-def config = SecurityConfig.development("https://localhost:8443")
+def config = SecurityConfig.testing("https://localhost:8443")
     .withOverrides([
         trustStore: trustStore,
         enforceHostnameVerification: false  // Dev only!
@@ -768,7 +770,7 @@ class SslConfigFactory {
             "changeit"
         )
         
-        return SecurityConfig.development(baseUrl)
+        return SecurityConfig.testing(baseUrl)
             .withOverrides([
                 trustStore: trustStore,
                 enforceHostnameVerification: false
@@ -868,7 +870,7 @@ javax.net.ssl.SSLPeerUnverifiedException: Hostname verification failed
 // Ensure hostname matches certificate CN or SAN
 
 // Temporary workaround (DEV ONLY):
-def config = SecurityConfig.development(baseUrl)
+def config = SecurityConfig.testing(baseUrl)
     .withOverrides([enforceHostnameVerification: false])
 
 // Production solution: Fix certificate or use correct hostname

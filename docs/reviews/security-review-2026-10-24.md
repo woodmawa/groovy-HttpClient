@@ -8,9 +8,11 @@ Every SEC-n finding below has a feature in `SecurityReviewSpec` stating the beha
 
 Baseline suite: 75 tests green. With the review spec: 94 tests green.
 
+**Status (2026-10-24, branch `uplift/groovy6-java25`):** every SEC finding below is fixed and its feature is now a required (non-pending) test. Two more findings came up while the documentation was being refreshed, SEC-13 and D-9. Suite: 126 tests, 0 failures, 0 skipped, on JDK 27.0.1 and OpenJDK 25.0.1, including real-TLS and mutual-TLS specs (`TlsTrustSpec`).
+
 ## Summary
 
-| ID | Severity | Finding | Spec |
+| ID | Severity | Finding | Spec / status |
 |---|---|---|---|
 | SEC-1 | **Critical** | `new GroovyHttpClient(String)` uses `SecurityConfig.testing()` → trust-all TLS. Every README and asciidoc quick-start uses this constructor. | red |
 | SEC-2 | High | `allowRedirects(false)` / `enableMetrics(false)` are silently ignored (`x ?: true` coerces `false` to `true`), in the Builder and in `withOverrides`. | red ×4 |
@@ -23,7 +25,10 @@ Baseline suite: 75 tests green. With the review spec: 94 tests green.
 | SEC-9 | Low | `close()` shuts the executor but never closes the `java.net.http.HttpClient` (selector thread and connections leak). | red |
 | SEC-10 | Medium | Retries apply to non-idempotent methods. `production()` retries POST/PATCH on IOException and timeout → duplicate writes. | not yet specced |
 | SEC-11 | Low | `HttpResponseException` puts the full response body in its message, so error bodies (tokens, PII) end up in logs. | not yet specced |
-| SEC-12 | Medium | Default headers and `cookieHandler` cookies (e.g. `Authorization`) go to every allowed absolute-URL host, and to redirect targets while the JDK follows redirects. Closed by the SEC-3 fix if redirects are handled in-library. | covered by SEC-3 fix |
+| SEC-12 | Medium | Default headers and `cookieHandler` cookies (e.g. `Authorization`) go to every allowed absolute-URL host, and to redirect targets while the JDK follows redirects. Closed by the SEC-3 fix if redirects are handled in-library. | fixed (SEC-12 features) |
+| SEC-13 | High | Found during the docs refresh. `trustStore`, `trustManagers` and `keyManagers` are used throughout SSL_CERTIFICATE_GUIDE.md, but `SecurityConfig` never had them and silently ignored unknown keys. Private-CA and mutual-TLS configurations therefore ran on the JVM default trust store, without the client certificate. | fixed: settings implemented, unknown keys refused; `TlsTrustSpec` |
+
+All of SEC-1 to SEC-12 are **fixed**. The "red" entries above are the baseline state; each feature is now a required test.
 
 Guards (green today): **G1** XML with a DOCTYPE/external entity is refused (XXE) · **G2** an absolute URL to a host outside `allowedHosts` (e.g. 169.254.169.254) is refused · **G3** absolute URLs are refused by default · **G4** `production()` verifies certificates and host names, TLS 1.3 only.
 
@@ -92,6 +97,11 @@ Retry applies to every method. `production()` turns on `onIoExceptions` and `onT
 - **D-5 `URLBuilder.isValidURL`** declares checked exceptions it swallows, and `URLBuilder` doesn't encode `path`. That's fine for a builder, but worth noting before anyone feeds it user input.
 - **D-6 `gradle.properties` is tracked despite `.gitignore` listing it under "Build Secrets".** It was committed before the ignore rule, so the rule has never applied. Its full history (4 commits) and the whole repo history were checked on 2026-10-24: no credentials were ever committed. Versions moved to `gradle/libs.versions.toml` in the uplift, and the file now carries a warning not to put secrets in it. Either drop the ignore entry or `git rm --cached` the file, so the label stops being misleading.
 - **D-7 The published javadoc jar is empty.** `javadoc` is NO-SOURCE for a Groovy-only project, so `withJavadocJar()` packages nothing. Package the `groovydoc` output as the `-javadoc` classifier before the next Central publish.
+- **D-9 `enableLogging` did nothing.** Chapter 3 documented logging of method, URL, headers, body, retries and breaker state, but nothing read the flag. Fixed with an INFO line per request, per retry and per followed redirect. URLs are logged without query string or user-info, and headers and bodies are never logged (spec D-9).
+- **E-1 `*Sync` methods threw `ExecutionException`.** Every chapter's `catch (HttpResponseException e)` around a sync call could never fire. Fixed: sync methods throw the underlying exception.
+- **E-2 Broken examples** (always wrong, independent of 2.0): `SecurityConfig.builder` / `development()` don't exist; README `RetryPolicy.Config()` method chains (the methods return void); the chapter 5 auth interceptor used the wrong `newBuilder` filter signature; `retry { }` inside the multipart part DSL; interceptor order documented as LIFO when it is FIFO; the chapter 4 integration example built a host-less URLBuilder, which throws. All corrected. `URLBuilderDocExamplesSpec` pins the URLBuilder encoding behaviour the docs rely on.
+- **T-1 Test debt.** A circuit-breaker integration spec replaces the final `httpClient` field reflectively. JDK 27 warns that final-field mutation will be blocked in a future release. Replace it with an injectable seam.
+- **G6-1 Groovy 6 trap.** A helper named `await(...)` is shadowed by Groovy 6's built-in `await` and fails at runtime (`No Awaitable adapter found`). The helper is now named `awaitResult`.
 - **D-8 Supply chain.** The wrapper now pins `distributionSha256Sum` (taken from services.gradle.org). `settings.gradle` still lists `mavenLocal()`, which can shadow Central artifacts on a build machine. Drop it for release builds.
 
 ## Recommended order

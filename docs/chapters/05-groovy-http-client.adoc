@@ -3,7 +3,7 @@
 
 == Overview
 
-`GroovyHttpClient` is the core class of this library, providing a fluent Groovy DSL for making HTTP requests. Built on Java 21's `HttpClient` and virtual threads, it delivers enterprise-grade features with an elegant, concise API.
+`GroovyHttpClient` is the core class of this library, providing a fluent Groovy DSL for making HTTP requests. Built on the JDK `HttpClient` (Java 25+) and virtual threads, it delivers enterprise-grade features with an elegant, concise API.
 
 [quote]
 ____
@@ -50,7 +50,7 @@ import org.softwood.http.GroovyHttpClient
 def client = new GroovyHttpClient("https://api.example.com")
 ----
 
-This uses testing defaults (relaxed security, suitable for development).
+This uses `SecurityConfig.defaults(baseUrl)`: verified TLS, no absolute URLs, policy-checked redirects, no automatic retries. (Before 2.0.0 it used the trust-all testing profile.)
 
 === With SecurityConfig
 
@@ -75,8 +75,10 @@ def client = GroovyHttpClient.builder("https://api.example.com")
     .connectTimeout(Duration.ofSeconds(5))
     .requestTimeout(Duration.ofSeconds(30))
     .allowRedirects(true)
+    .maxRedirects(3)
     .failureThreshold(5)
     .maxResponseBytes(50_000_000L)
+    .sslContext(privateCaContext)     // optional: verified TLS against your own trust material
     .build()
 ----
 
@@ -225,6 +227,24 @@ def response = client.getSync("/search") {
 }
 ----
 
+.Request DSL methods
+[cols="2,3"]
+|===
+|Method |Effect for this request
+
+|`query(Map)` |Append query parameters (URL-encoded)
+|`header(name, value)` |Add a header value
+|`setHeader(name, value)` |Replace every value of a header, default headers included
+|`cookie(name, value)` / `cookies(Map)` |Send cookies; names and values are validated against RFC 6265
+|`form(Map)` / `json(obj)` |Set a URL-encoded or JSON body and its Content-Type
+|`timeout(Duration)` |Override the configured request timeout
+|`version(HttpClient.Version)` |Prefer an HTTP version
+|`expectContinue(boolean)` |Send `Expect: 100-continue`
+|`retry { ... }` |Override the retry policy
+|===
+
+NOTE: Calling anything else inside the closure throws `MissingMethodException`. Before 2.0.0, unknown calls were forwarded to an internal builder that was never sent, so settings such as `timeout(...)` were silently lost.
+
 === Query Parameters
 
 *Single Parameters*:
@@ -323,6 +343,8 @@ client.getSync("/profile") {
 [NOTE]
 ====
 Cookies set via the DSL are *per-request*. For persistent cookies across requests, use the automatic cookie manager (see <<cookies,Cookie Management>>).
+
+Cookie names must be RFC 6265 tokens and values cookie-octets: no `;`, `,`, whitespace, quotes, backslash or control characters. Anything else raises `IllegalArgumentException`, so a value can't smuggle in extra cookies. URL-encode or Base64 values that need those characters.
 ====
 
 === Form Data
@@ -576,7 +598,8 @@ new File("document.pdf").bytes = pdfBytes
 println "Downloaded ${pdfBytes.length} bytes"
 ----
 
-== [[cookies]]Cookie Management
+[[cookies]]
+== Cookie Management
 
 GroovyHttpClient includes automatic cookie management via `java.net.CookieManager`.
 
@@ -803,7 +826,7 @@ new File("huge-file.zip").withOutputStream { out ->
 
 === HTTP Error Responses
 
-By default, responses with status >= 400 throw `HttpResponseException`:
+Responses with status >= 400 fail with `HttpResponseException`, after any retries. The `*Sync` methods throw the underlying exception directly. The async methods complete their `CompletableFuture` exceptionally, so `future.get()` wraps it in `ExecutionException`:
 
 [source,groovy]
 ----
@@ -811,7 +834,7 @@ try {
     def response = client.getSync("/nonexistent")
 } catch (GroovyHttpClient.HttpResponseException e) {
     println "HTTP Error ${e.statusCode}"
-    println "Response body: ${e.message}"
+    println "Response body: ${e.responseBody}"   // full body; the message holds only a short snippet
     
     if (e.statusCode == 404) {
         println "Resource not found"
@@ -820,6 +843,8 @@ try {
     }
 }
 ----
+
+NOTE: Before 2.0.0 the `*Sync` methods threw `ExecutionException` and put the whole response body in the exception message.
 
 === Network Errors
 
@@ -834,8 +859,21 @@ try {
     println "Request timed out"
 } catch (IOException e) {
     println "Network error: ${e.message}"
-} catch (InterruptedException e) {
-    println "Request interrupted"
+} catch (java.util.concurrent.TimeoutException e) {
+    println "Gave up waiting (the getSync timeout argument)"
+}
+----
+
+=== Policy Errors
+
+[source,groovy]
+----
+try {
+    client.getSync("/download")
+} catch (GroovyHttpClient.RedirectRejectedException e) {
+    // redirect to a host outside allowedHosts, HTTPS -> HTTP, or more than maxRedirects hops
+} catch (GroovyHttpClient.HttpResponseException e) {
+    if (e.statusCode == 413) println "Response exceeded maxResponseBytes"
 }
 ----
 
@@ -902,6 +940,20 @@ def response = client.getSync("/critical-data") {
         onIoExceptions(true)
         onTimeouts(true)
         on5xx(true)
+    }
+}
+----
+
+POST, PATCH and CONNECT are never retried unless the policy opts in. Do that only when the server de-duplicates, e.g. with an idempotency key:
+
+[source,groovy]
+----
+client.postSync("/orders", orderJson) {
+    header "Idempotency-Key", orderId
+    retry {
+        maxAttempts 3
+        on5xx(true)
+        retryNonIdempotent(true)
     }
 }
 ----
@@ -973,13 +1025,11 @@ retry {
 
 [WARNING]
 ====
-Be very careful with retries on POST, PUT, PATCH, DELETE. These operations are typically *not idempotent*, so retrying can cause:
+PUT and DELETE are idempotent by definition, so they are retried like GET. If your API doesn't honour that, use `maxAttempts(1)` for those calls. POST and PATCH are not retried unless you opt in with `retryNonIdempotent(true)`. Retrying them without server-side de-duplication can cause:
 
 * Duplicate charges
 * Multiple record creations
 * Data inconsistency
-
-For non-idempotent operations, implement idempotency tokens or use `maxAttempts(1)`.
 ====
 
 == Request Interceptors
@@ -1022,45 +1072,20 @@ client.addInterceptor { ctx, next ->
 def authToken = "Bearer xyz123"
 
 client.addInterceptor { ctx, next ->
-    // Add auth header to every request
-    def request = ctx.requestSupplier.call()
-    def newRequest = HttpRequest.newBuilder(request, { builder, name, value ->
-        builder.header(name, value)
-    })
-    .header("Authorization", authToken)
-    .build()
-    
-    // Update context
-    ctx.requestSupplier = { newRequest }
-    
+    // Add an auth header to every attempt (the supplier runs again on each retry)
+    def original = ctx.requestSupplier
+    ctx.requestSupplier = { ->
+        HttpRequest.newBuilder(original.call(), { name, value -> true })
+                .setHeader("Authorization", authToken)
+                .build()
+    }
     return next.call(ctx)
 }
 ----
 
-*Retry Interceptor* (custom logic):
-[source,groovy]
-----
-client.addInterceptor { ctx, next ->
-    int attempt = 0
-    CompletableFuture<HttpClientResponse> result
-    
-    while (attempt < 3) {
-        result = next.call(ctx)
-        try {
-            def response = result.get()
-            if (response.statusCode < 500) {
-                return CompletableFuture.completedFuture(response)
-            }
-        } catch (Exception e) {
-            // Retry on exception
-        }
-        attempt++
-        Thread.sleep(100 * attempt)
-    }
-    
-    return result
-}
-----
+TIP: For a fixed token, `client.setHeader("Authorization", token)` is simpler. Either way, the header is dropped automatically if a redirect leaves the original origin.
+
+TIP: Don't write retry logic in an interceptor; use a `RetryPolicy`. The client re-runs the whole interceptor chain for each attempt, with `ctx.attempt` set.
 
 *Metrics Interceptor*:
 [source,groovy]
@@ -1074,7 +1099,8 @@ client.addInterceptor { ctx, next ->
     requestCount.incrementAndGet()
     
     return next.call(ctx).whenComplete { response, error ->
-        if (error) {
+        // 4xx/5xx arrive here as responses; `error` is a transport or policy failure
+        if (error || response?.statusCode >= 400) {
             errorCount.incrementAndGet()
         }
     }
@@ -1113,7 +1139,9 @@ The `RequestContext` object provides:
 
 [NOTE]
 ====
-Interceptors execute in LIFO order (last added runs first). This matches how middleware chains typically work.
+Interceptors run in the order they were added: the first added is the outermost, so it sees the request first and the response last.
+
+From 2.0.0, interceptors receive 4xx and 5xx responses as ordinary responses. The `HttpResponseException` is raised after retries, outside the interceptor chain.
 ====
 
 == Lifecycle Management

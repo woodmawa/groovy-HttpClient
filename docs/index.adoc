@@ -5,7 +5,7 @@
 :sectnums:
 :icons: font
 :source-highlighter: rouge
-:version: 1.0.2
+:version: 2.0.0
 :author: Will Woodman
 :email: will.woodman.softwood@outlook.com
 
@@ -14,7 +14,9 @@ include::attributes.adoc[]
 [preface]
 == Preface
 
-A modern, production-ready HTTP client built on Java 25 virtual threads with comprehensive Groovy DSL support, and testing framework support.
+A modern, production-ready HTTP client for Groovy 6 and Java 25+, built on the JDK `HttpClient` and virtual threads, with secure defaults, a comprehensive Groovy DSL and a testing framework.
+
+NOTE: Upgrading from 1.x? Read <<upgrading-2>> first -- 2.0.0 changes several security-relevant defaults.
 
 include::chapters/01-introduction.adoc[]
 
@@ -38,13 +40,15 @@ include::chapters/10-testing-trait.adoc[]
 
 include::chapters/11-examples.adoc[]
 
-[appendix]
-== API Reference
-...
+include::chapters/12-upgrading-2.0.adoc[]
 
 [appendix]
-== Troubleshooting
-...
+[[api-reference]]
+== API Reference
+
+The complete API -- every public class, method and setting -- is in the Groovydoc published with each release (the `-javadoc` artifact on Maven Central), and can be generated locally with `./gradlew groovydoc` (output in `build/docs/groovydoc`). The classes most used directly are `org.softwood.http.GroovyHttpClient` (and its nested `Builder`, `RetryPolicy`, `HttpClientResponse` and exception types), `org.softwood.http.SecurityConfig`, `org.softwood.http.MultipartPart` and `org.softwood.url.URLBuilder`.
+
+include::chapters/appendix-troubleshooting.adoc[]
 
 [index]
 == Index

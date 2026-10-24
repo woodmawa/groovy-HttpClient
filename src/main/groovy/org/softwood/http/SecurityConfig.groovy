@@ -2,7 +2,11 @@ package org.softwood.http
 
 import groovy.util.logging.Slf4j
 
+import javax.net.ssl.KeyManager
 import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.TrustManagerFactory
+import java.security.KeyStore
 import java.time.Duration
 
 /*
@@ -37,6 +41,10 @@ import java.time.Duration
  *   <li>{@link #trustAll(String)} -- disables certificate and host-name verification. Local development
  *       only. This is the only profile that does.</li>
  * </ul>
+ *
+ * <h2>Custom trust and client certificates</h2>
+ * Verified TLS against your own trust material: {@code trustStore} (a KeyStore of trusted certificates),
+ * or {@code trustManagers}; mutual TLS with {@code keyManagers}; or a complete {@code sslContext}.
  *
  * <h2>Overrides</h2>
  * Any profile can be adjusted with {@link #withOverrides(Map)}. An explicitly supplied value always wins,
@@ -77,8 +85,22 @@ class SecurityConfig {
     final boolean enforceHostnameVerification
     final List<String> allowedTlsProtocols
     final List<String> allowedCipherSuites
-    /** Optional SSLContext for verified TLS (e.g. a test or private-CA trust store). Null = JVM default. */
+    /** SSLContext used for verified TLS: the one supplied, or one built from trustStore / trustManagers / keyManagers. Null = JVM default. */
     final SSLContext sslContext
+    /** Trusted certificates (private CA, self-signed test server). */
+    final KeyStore trustStore
+    final TrustManager[] trustManagers
+    /** Client certificate(s) for mutual TLS. */
+    final KeyManager[] keyManagers
+    private final SSLContext suppliedSslContext
+
+    /** Every setting name the constructor accepts; anything else is refused (SEC-13). */
+    static final Set<String> SETTINGS = ([
+            'baseUrl', 'connectTimeout', 'requestTimeout', 'insecureAllowed', 'allowAbsoluteUrls', 'maxResponseBytes',
+            'cookiePolicy', 'allowedHosts', 'enableLogging', 'enableMetrics', 'allowRedirects', 'maxRedirects',
+            'failureThreshold', 'resetTimeoutMs', 'retryPolicy', 'enforceHostnameVerification', 'allowedTlsProtocols',
+            'allowedCipherSuites', 'sslContext', 'trustStore', 'trustManagers', 'keyManagers'
+    ] as LinkedHashSet<String>).asImmutable()
 
     /**
      * Map-based constructor used by the profiles, {@link GroovyHttpClient.Builder} and {@link #withOverrides}.
@@ -87,6 +109,12 @@ class SecurityConfig {
      */
     protected SecurityConfig(Map args) {
         Map a = args ?: [:]
+        Set<String> unknown = (a.keySet().collect { it as String } as Set<String>) - SETTINGS
+        if (unknown) {
+            // Before 2.0.0 unknown keys were silently ignored -- which is how documented settings such as
+            // trustStore / keyManagers never took effect. A misspelt security setting must fail loudly.
+            throw new IllegalArgumentException("Unknown SecurityConfig setting(s): ${unknown.sort()}. Valid: ${SETTINGS}")
+        }
         this.baseUrl                     = a.baseUrl as String
         if (!baseUrl || !(baseUrl.startsWith('http://') || baseUrl.startsWith('https://'))) {
             throw new IllegalArgumentException("baseUrl must be an absolute http(s) URL: ${baseUrl}")
@@ -114,13 +142,37 @@ class SecurityConfig {
                 (opt(a, 'allowedTlsProtocols', ['TLSv1.3', 'TLSv1.2']) as List<String>).collect { it as String })
         this.allowedCipherSuites         = Collections.unmodifiableList(
                 (opt(a, 'allowedCipherSuites', []) as List<String>).collect { it as String })
-        this.sslContext                  = opt(a, 'sslContext', null) as SSLContext
+        this.suppliedSslContext          = opt(a, 'sslContext', null) as SSLContext
+        this.trustStore                  = opt(a, 'trustStore', null) as KeyStore
+        this.trustManagers               = opt(a, 'trustManagers', null) as TrustManager[]
+        this.keyManagers                 = opt(a, 'keyManagers', null) as KeyManager[]
+
+        boolean customMaterial = trustStore != null || trustManagers != null || keyManagers != null
+        if (suppliedSslContext != null && customMaterial) {
+            throw new IllegalArgumentException("sslContext cannot be combined with trustStore / trustManagers / keyManagers")
+        }
+        if (trustStore != null && trustManagers != null) {
+            throw new IllegalArgumentException("Supply trustStore or trustManagers, not both")
+        }
+        if (insecureAllowed && (suppliedSslContext != null || customMaterial)) {
+            throw new IllegalArgumentException("insecureAllowed cannot be combined with sslContext / trustStore / trustManagers / keyManagers")
+        }
+        this.sslContext = suppliedSslContext ?: (customMaterial ? buildSslContext(trustStore, trustManagers, keyManagers) : null)
 
         if (maxResponseBytes <= 0) throw new IllegalArgumentException("maxResponseBytes must be > 0 (use Long.MAX_VALUE for no limit)")
         if (maxRedirects < 0) throw new IllegalArgumentException("maxRedirects must be >= 0")
-        if (insecureAllowed && sslContext != null) {
-            throw new IllegalArgumentException("insecureAllowed and sslContext are mutually exclusive")
+    }
+
+    private static SSLContext buildSslContext(KeyStore trustStore, TrustManager[] trustManagers, KeyManager[] keyManagers) {
+        TrustManager[] tms = trustManagers
+        if (tms == null && trustStore != null) {
+            TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+            tmf.init(trustStore)
+            tms = tmf.trustManagers
         }
+        SSLContext ctx = SSLContext.getInstance('TLS')
+        ctx.init(keyManagers, tms, null)   // null trust managers = JVM default trust (e.g. mTLS to a public-CA server)
+        ctx
     }
 
     private static Object opt(Map a, String key, Object dflt) {
@@ -237,7 +289,10 @@ class SecurityConfig {
                 enforceHostnameVerification: enforceHostnameVerification,
                 allowedTlsProtocols        : allowedTlsProtocols,
                 allowedCipherSuites        : allowedCipherSuites,
-                sslContext                 : sslContext
+                sslContext                 : suppliedSslContext,
+                trustStore                 : trustStore,
+                trustManagers              : trustManagers,
+                keyManagers                : keyManagers
         ] as Map<String, Object>
     }
 

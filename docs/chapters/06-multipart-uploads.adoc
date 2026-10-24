@@ -520,21 +520,21 @@ Configure retries for flaky uploads:
 
 [source,groovy]
 ----
-client.postMultipartSync("/upload") {
-    part {
-        name "file"
-        filename "important.pdf"
-        data pdfBytes
-    }
-    
+def parts = [MultipartPart.bytes("file", "important.pdf", "application/pdf", pdfBytes)]
+
+client.postMultipartSync("/upload", parts) {
+    header "Idempotency-Key", uploadId     // let the server drop a duplicate
     retry {
         maxAttempts 3
         backoffExponential(1000, 5000, true)
         onTimeouts true
         on5xx true
+        retryNonIdempotent true            // uploads are POSTs: retries need this opt-in
     }
 }
 ----
+
+NOTE: Retry is configured on the request-configuration closure of the list-based `postMultipart(path, parts) { ... }` form. The part DSL (`postMultipart(path) { part { ... } }`) describes parts only. Since 2.0.0, a POST is retried only with `retryNonIdempotent`.
 
 == Testing Multipart Uploads
 
@@ -781,12 +781,16 @@ GroovyHttpClient automatically generates unique boundaries:
 
 No manual boundary management required.
 
+=== Header Safety
+
+A part's `name`, `filename` and `contentType` are written into part headers, so they are validated when the part is created. CR, LF or NUL raises `IllegalArgumentException` (a value containing them could start a new header or part), and `"` is percent-encoded as `%22` (RFC 7578 section 4.2). This applies to every way of creating a part: the constructors, `MultipartPart.text/json/bytes` and the `part { ... }` DSL. Take user-supplied file names through `new File(name).name` or similar, so path components don't reach the server either.
+
 ## Performance Considerations
 
 [horizontal]
 *Memory Usage*:: All parts loaded into memory — avoid very large files
 *Network*:: Multipart has overhead vs. direct binary POST
-*Retries*:: Entire payload retransmitted on retry
+*Retries*:: Not retried by default (POST); with `retryNonIdempotent` the entire payload is retransmitted
 *Timeouts*:: Scale timeout with total payload size
 
 ## Next Steps

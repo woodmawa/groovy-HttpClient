@@ -898,5 +898,5 @@ The trait uses a single shared server for all tests, so port conflicts shouldn't
 You now have all the tools for comprehensive HTTP client testing:
 
 * <<examples,Real-World Examples>> — Complete, working test suites
-* <<best-practices,Testing Best Practices>> — Patterns and anti-patterns
+* <<troubleshooting,Troubleshooting>> — Common errors and what they mean
 * <<architecture,Architecture Overview>> — Understanding the full picture

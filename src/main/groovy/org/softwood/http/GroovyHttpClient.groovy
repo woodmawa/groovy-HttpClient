@@ -228,6 +228,8 @@ class GroovyHttpClient implements AutoCloseable {
         private List<String> allowedCipherSuites = []
         private RetryPolicy retryPolicy
         private SSLContext sslContext
+        private java.security.KeyStore trustStore
+        private javax.net.ssl.KeyManager[] keyManagers
         private Integer maxRedirects
 
         Builder(String baseUrl) { this.baseUrl = baseUrl }
@@ -251,6 +253,10 @@ class GroovyHttpClient implements AutoCloseable {
         /** Verified TLS against this context's trust material (private CA, test trust store). */
         Builder sslContext(SSLContext ctx) { this.sslContext = ctx; this }
         Builder maxRedirects(int hops) { this.maxRedirects = hops; this }
+        /** Trust exactly the certificates in this KeyStore (private CA, self-signed server). */
+        Builder trustStore(java.security.KeyStore ks) { this.trustStore = ks; this }
+        /** Client certificate(s) for mutual TLS. */
+        Builder keyManagers(javax.net.ssl.KeyManager[] kms) { this.keyManagers = kms; this }
 
         GroovyHttpClient build() {
             def cfg = new SecurityConfig([
@@ -272,6 +278,8 @@ class GroovyHttpClient implements AutoCloseable {
                     allowedCipherSuites        : allowedCipherSuites,
                     retryPolicy                : retryPolicy,
                     sslContext                 : sslContext,
+                    trustStore                 : trustStore,
+                    keyManagers                : keyManagers,
                     maxRedirects               : maxRedirects
             ])
             new GroovyHttpClient(cfg)
@@ -327,7 +335,7 @@ class GroovyHttpClient implements AutoCloseable {
 
         if (config.insecureAllowed) {
             this.httpClient = createInsecureClient(b, config)
-            log.warn("[GroovyHttpClient] Insecure TLS permitted by SecurityConfig (trustAll/testing). DO NOT use in production.")
+            log.warn("[GroovyHttpClient] Certificate and host-name verification DISABLED (SecurityConfig insecureAllowed / trustAll) for {}. Never use this in production.", config.baseUrl)
         } else {
             this.httpClient = createSecureClient(b, config)
         }
@@ -733,27 +741,38 @@ class GroovyHttpClient implements AutoCloseable {
         send("PATCH", path, body, cfg)
     }
 
-    // Sync
+    // Sync -- each throws the underlying failure (HttpResponseException, HttpTimeoutException,
+    // IOException, CircuitOpenException, RedirectRejectedException...), not ExecutionException (2.0.0),
+    // and java.util.concurrent.TimeoutException if the caller's own wait expires.
+    // Not named await: Groovy 6 provides a built-in await(...) (async/await), which would take the call.
+    private static <T> T awaitResult(CompletableFuture<T> future, Duration timeout) {
+        try {
+            return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        } catch (java.util.concurrent.ExecutionException e) {
+            throw unwrapCompletion(e.cause ?: e)
+        }
+    }
+
     HttpClientResponse getSync(String path, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        get(path, cfg).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        awaitResult(get(path, cfg), timeout)
     }
     HttpClientResponse postSync(String path, String body, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        post(path, body, cfg).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        awaitResult(post(path, body, cfg), timeout)
     }
     HttpClientResponse putSync(String path, String body, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        put(path, body, cfg).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        awaitResult(put(path, body, cfg), timeout)
     }
     HttpClientResponse patchSync(String path, String body, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        patch(path, body, cfg).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        awaitResult(patch(path, body, cfg), timeout)
     }
     HttpClientResponse deleteSync(String path, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        delete(path, cfg).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        awaitResult(delete(path, cfg), timeout)
     }
     HttpClientResponse headSync(String path, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        head(path, cfg).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        awaitResult(head(path, cfg), timeout)
     }
     HttpClientResponse optionsSync(String path, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        options(path, cfg).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        awaitResult(options(path, cfg), timeout)
     }
 
     /* =========================================================================
@@ -852,8 +871,13 @@ class GroovyHttpClient implements AutoCloseable {
     private Closure<CompletableFuture<HttpClientResponse>> buildInterceptorChain() {
         Closure<CompletableFuture<HttpClientResponse>> terminal = { RequestContext ctx ->
             HttpRequest req = ctx.requestSupplier.call()
+            long started = System.nanoTime()
             sendFollowingRedirects(req, 0)
                     .thenApply { HttpResponse<byte[]> resp ->
+                        if (config.enableLogging) {
+                            log.info("[GroovyHttpClient] {} {} -> {} in {} ms (attempt {})", ctx.method, loggableUri(resp.uri()),
+                                    resp.statusCode(), (System.nanoTime() - started).intdiv(1_000_000L), ctx.attempt)
+                        }
                         // byte-accurate maxResponseBytes
                         if (maxResponseBytes != Long.MAX_VALUE && resp.body() != null && resp.body().length > maxResponseBytes) {
                             throw new HttpResponseException(413, "Body too large (>${maxResponseBytes} bytes)")
@@ -906,6 +930,11 @@ class GroovyHttpClient implements AutoCloseable {
                         (cause == null ? policy.shouldRetry(null, resp) : policy.shouldRetry(cause, null))
                 if (again) {
                     long delayMs = policy.nextDelayMs(attempt.get())
+                    if (config.enableLogging) {
+                        log.info("[GroovyHttpClient] retrying {} {} in {} ms (attempt {} of {}) after {}", ctx.method,
+                                loggableUri(ctx.uri), delayMs, attempt.get() + 1, policy.maxAttempts,
+                                cause == null ? "status ${resp?.statusCode}" : cause.class.simpleName)
+                    }
                     attempt.incrementAndGet()
                     CompletableFuture.delayedExecutor(delayMs, TimeUnit.MILLISECONDS, executor as java.util.concurrent.Executor)
                             .execute { doAttempt.call() }
@@ -963,6 +992,16 @@ class GroovyHttpClient implements AutoCloseable {
 
     private static String normalizeHost(String h) { SecurityConfig.normalizeHost(h) }
 
+    /**
+     * URI for log lines: scheme, host, port and path only. The query string and user-info are dropped
+     * because they routinely carry tokens. Headers and bodies are never logged.
+     */
+    static String loggableUri(URI u) {
+        if (u == null) return 'null'
+        String port = u.port != -1 ? ':' + u.port : ''
+        (u.scheme ?: '') + '://' + (u.host ?: '') + port + (u.rawPath ?: '')
+    }
+
     /* =========================================================================
      * Redirects (SEC-3 / SEC-12): followed here, never by the JDK client, so every
      * hop is policy-checked and credentials do not cross origins
@@ -985,6 +1024,9 @@ class GroovyHttpClient implements AutoCloseable {
             }
             URI target = req.uri().resolve(location.get().trim())
             checkRedirectTarget(req.uri(), target)
+            if (config.enableLogging) {
+                log.info("[GroovyHttpClient] following {} redirect {} -> {}", resp.statusCode(), loggableUri(req.uri()), loggableUri(target))
+            }
             return sendFollowingRedirects(redirectRequest(req, target, resp.statusCode()), hop + 1)
         } as CompletableFuture<HttpResponse<byte[]>>
     }
@@ -1210,7 +1252,7 @@ class GroovyHttpClient implements AutoCloseable {
             @DelegatesTo(strategy = Closure.DELEGATE_ONLY, value = MultipartDSLBuilder) Closure dsl,
             Duration timeout = DEFAULT_SYNC_TIMEOUT
     ) {
-        postMultipart(path, dsl).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        awaitResult(postMultipart(path, dsl), timeout)
     }
 
     CompletableFuture<HttpClientResponse> postMultipart(
@@ -1271,7 +1313,7 @@ class GroovyHttpClient implements AutoCloseable {
             Closure cfg = null,
             Duration timeout = DEFAULT_SYNC_TIMEOUT
     ) {
-        postMultipart(path, parts, cfg).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        awaitResult(postMultipart(path, parts, cfg), timeout)
     }
 
     CompletableFuture<byte[]> downloadBytes(String path,
@@ -1284,7 +1326,7 @@ class GroovyHttpClient implements AutoCloseable {
     }
 
     byte[] downloadBytesSync(String path, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        downloadBytes(path).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        awaitResult(downloadBytes(path), timeout)
     }
 
     /* =========================================================================

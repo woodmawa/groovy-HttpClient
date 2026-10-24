@@ -396,7 +396,7 @@ class SecurityReviewSpec extends Specification {
 
         then:
         hits['/order'].get() == expectedHits
-        optIn ? (outcome.statusCode == 201) : (outcome instanceof ExecutionException && outcome.cause.statusCode == 503)
+        optIn ? (outcome.statusCode == 201) : (outcome instanceof GroovyHttpClient.HttpResponseException && outcome.statusCode == 503)
 
         cleanup:
         client?.close()
@@ -454,6 +454,25 @@ class SecurityReviewSpec extends Specification {
         client?.close()
     }
 
+    def "sync methods throw the underlying failure, not ExecutionException"() {
+        given:
+        route('/missing') { ex -> reply(ex, 404, 'nope') }
+        route('/slow') { ex -> Thread.sleep(1500); reply(ex, 200, 'late') }
+        def client = GroovyHttpClient.builder(base).build()
+
+        when:
+        def notFound = outcomeOf { client.getSync('/missing') }
+        def timedOut = outcomeOf { client.getSync('/slow') { timeout(java.time.Duration.ofMillis(200)) } }
+
+        then:
+        notFound instanceof GroovyHttpClient.HttpResponseException
+        (notFound as GroovyHttpClient.HttpResponseException).statusCode == 404
+        timedOut instanceof java.net.http.HttpTimeoutException
+
+        cleanup:
+        client?.close()
+    }
+
     def "C-1 an unknown DSL call fails loudly instead of being silently dropped"() {
         given:
         route('/ok') { ex -> reply(ex, 200, 'ok') }
@@ -467,6 +486,37 @@ class SecurityReviewSpec extends Specification {
 
         cleanup:
         client?.close()
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // D-9 -- enableLogging logs the request line, never credentials
+    // ------------------------------------------------------------------------------------------
+
+    @Unroll
+    def "D-9 enableLogging(#enabled) logs the status line without query string or credentials"() {
+        given:
+        def logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(GroovyHttpClient)
+        def appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>()
+        appender.start()
+        logger.addAppender(appender)
+        route('/items') { ex -> reply(ex, 200, 'ok') }
+        def client = GroovyHttpClient.builder(base).enableLogging(enabled).build()
+        client.setHeader('Authorization', 'Bearer s3cr3t-value')
+
+        when:
+        client.getSync('/items?token=abc123')
+        def lines = appender.list*.formattedMessage.findAll { it.contains('[GroovyHttpClient]') }
+
+        then:
+        lines.any { it.contains("GET http://localhost:${port}/items -> 200".toString()) } == enabled
+        lines.every { !it.contains('abc123') && !it.contains('s3cr3t') }
+
+        cleanup:
+        logger.detachAppender(appender)
+        client?.close()
+
+        where:
+        enabled << [true, false]
     }
 
     // ------------------------------------------------------------------------------------------

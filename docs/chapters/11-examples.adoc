@@ -460,8 +460,10 @@ def config = SecurityConfig.production("https://api.example.com")
 
 def client = new GroovyHttpClient(config)
 
-// This will retry up to 5 times on failures
+// GET is idempotent: up to 5 attempts on I/O errors, timeouts and 5xx
 def response = client.getSync("/flaky-endpoint")
+
+// POST is not retried unless the policy says retryNonIdempotent(true)
 ----
 
 === Circuit Breaker Pattern

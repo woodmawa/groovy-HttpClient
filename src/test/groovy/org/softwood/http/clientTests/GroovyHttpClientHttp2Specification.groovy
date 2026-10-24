@@ -141,9 +141,8 @@ class GroovyHttpClientHttp2Spec extends Specification {
         client.getSync("/secure")
 
         then:
-        def ex = thrown(ExecutionException)
-        ex.cause instanceof GroovyHttpClient.HttpResponseException
-        ex.cause.message.contains("HTTP error: 400")
+        def ex = thrown(GroovyHttpClient.HttpResponseException)
+        ex.statusCode == 400
     }
 
     def "should clear cookies and enforce rejection after removal"() {
@@ -169,9 +168,8 @@ class GroovyHttpClientHttp2Spec extends Specification {
         client.getSync("/cookie-test")
 
         then: "should fail after clearing cookies"
-        def ex = thrown(ExecutionException)
-        ex.cause instanceof GroovyHttpClient.HttpResponseException
-        ex.cause.message.contains("Cookie mismatch")
+        def ex = thrown(GroovyHttpClient.HttpResponseException)
+        ex.responseBody.contains("Cookie mismatch")
 
         cleanup:
         mockServer.shutdown()
