@@ -2,14 +2,21 @@ plugins {
     id 'groovy'
     id 'maven-publish'
     id 'signing'
-    id 'org.asciidoctor.jvm.convert' version '4.0.2'
-    id 'org.asciidoctor.jvm.pdf' version '4.0.2'
+    alias(libs.plugins.asciidoctor.convert)
+    alias(libs.plugins.asciidoctor.pdf)
     // Nexus publish plugin for Maven Central
-    id 'io.github.gradle-nexus.publish-plugin' version '2.0.0'
+    alias(libs.plugins.nexus.publish)
 }
 
+// Toolchain policy (2.0.0):
+//   - build and test on JDK 27 (HTTP/3 in java.net.http needs JDK 26+, JEP 517)
+//   - emit Java 25 bytecode: the consumer floor is the current LTS
+//   - testJava25 re-runs the suite on a JDK 25 runtime, so the floor is proven, not just declared
+def buildJdk    = 27
+def bytecodeJdk = 25
+
 group = 'io.github.woodmawa'  // Or 'io.github.woodmawa' if using GitHub-based group
-version = '1.0.2'  // Use 1.0.0-SNAPSHOT for development, 1.0.0 for release
+version = '2.0.0-SNAPSHOT'  // 2.0.0: Groovy 6, Java 25 floor, security behaviour changes (see docs/reviews)
 
 repositories {
     mavenCentral()
@@ -17,12 +24,8 @@ repositories {
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(25)  // Maven Central requires Java 8+
+        languageVersion = JavaLanguageVersion.of(buildJdk)
     }
-
-    // Produce Java 21-compatible bytecode
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
 
     // Required for Maven Central
     withSourcesJar()
@@ -30,37 +33,53 @@ java {
 }
 
 dependencies {
-    implementation "org.apache.groovy:groovy:$groovyVersion"
-    implementation "org.apache.groovy:groovy-json:$groovyVersion"
-    implementation "org.apache.groovy:groovy-xml:$groovyVersion"
-    implementation("org.slf4j:slf4j-api:2.0.17")
-    implementation("ch.qos.logback:logback-classic:1.5.20")
+    implementation libs.groovy
+    implementation libs.groovy.json
+    implementation libs.groovy.xml
+    implementation libs.slf4j.api
+    implementation libs.logback.classic
 
-    testImplementation "org.spockframework:spock-core:$spockVersion"
-    testImplementation platform('org.junit:junit-bom:6.0.1')
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-    testImplementation 'org.junit.jupiter:junit-jupiter'
-    testImplementation("net.bytebuddy:byte-buddy:1.17.8")
+    testImplementation libs.spock.core
+    testImplementation platform(libs.junit.bom)
+    testRuntimeOnly libs.junit.launcher
+    testImplementation libs.junit.jupiter
+    testImplementation libs.bytebuddy
 
-    testImplementation "org.eclipse.jetty:jetty-server:$jettyVersion"
-    testImplementation "org.eclipse.jetty:jetty-alpn-java-server:$jettyVersion"
-    testImplementation "org.eclipse.jetty.http2:jetty-http2-server:$jettyVersion"
-    testImplementation "org.eclipse.jetty.http2:jetty-http2-common:$jettyVersion"
-    testImplementation "org.eclipse.jetty.ee10:jetty-ee10-servlet:$jettyVersion"
+    testImplementation libs.jetty.server
+    testImplementation libs.jetty.alpn.java
+    testImplementation libs.jetty.http2.server
+    testImplementation libs.jetty.http2.common
+    testImplementation libs.jetty.ee10.servlet
 }
 
-// Ensure Java 21 bytecode for all compile tasks
 tasks.withType(JavaCompile).configureEach {
-    options.release = 21
+    options.release = bytecodeJdk
 }
 
 tasks.withType(GroovyCompile).configureEach {
-    sourceCompatibility = '21'
-    targetCompatibility = '21'
+    sourceCompatibility = "$bytecodeJdk"
+    targetCompatibility = "$bytecodeJdk"
 }
 
 test {
     useJUnitPlatform()
+}
+
+// Same suite on the consumer floor runtime
+tasks.register('testJava25', Test) {
+    description = "Runs the test suite on a JDK ${bytecodeJdk} runtime (the bytecode floor)."
+    group = 'verification'
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(bytecodeJdk)
+    }
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform()
+    shouldRunAfter test
+}
+
+tasks.named('check') {
+    dependsOn 'testJava25'
 }
 
 // Javadoc configuration - required for Maven Central
@@ -138,7 +157,7 @@ signing {
 
     // 1. Only require signing for actual release tasks
     // Check inside the closure so it evaluates at the right time
-    required {
+    required = {
         gradle.taskGraph.hasTask("publishToSonatype") ||
                 gradle.taskGraph.hasTask("publishToMavenCentral")
     }

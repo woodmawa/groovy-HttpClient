@@ -1,8 +1,7 @@
 
 /*
- * Minimal Gradle 9+ settings for GroovyFX modernization
- * - Removes jcenter()
- * - Keeps only repositories needed to resolve plugins and dependencies
+ * Gradle 9 settings for groovy-HttpClient.
+ * Versions live in gradle/libs.versions.toml (the default catalog, picked up automatically).
  */
 pluginManagement {
     repositories {
