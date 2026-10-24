@@ -21,6 +21,7 @@ A modern, production-ready HTTP client for Groovy and Java applications, built o
 - `*Sync` methods throw the real exception (`HttpResponseException`, ...) instead of `ExecutionException`.
 - Cookie and multipart header values are validated; per-request `timeout(...)` works; `enableLogging` logs credential-safe request lines.
 - No bundled logging backend: add your own SLF4J binding.
+- **New: HTTP/3** on JDK 26+ (`builder(url).http3()`), falling back to HTTP/2 elsewhere.
 
 ---
 
@@ -28,7 +29,13 @@ A modern, production-ready HTTP client for Groovy and Java applications, built o
 
 ### **Modern Architecture**
 - **Virtual Thread Executor** — Handle millions of concurrent requests with minimal overhead
-- **HTTP/2 Support** — Automatic protocol negotiation with multiplexing
+- **HTTP/2 and HTTP/3** — HTTP/2 by default; HTTP/3 (QUIC) on JDK 26+ with `http3()`, detected at runtime from one jar
+
+```groovy
+def client = GroovyHttpClient.builder("https://cloudflare.com").http3().build()
+def resp = client.getSync("/cdn-cgi/trace")
+println resp.httpVersion   // HTTP_3 when QUIC was negotiated
+```
 - **Zero Magic** — Wraps Java's standard `HttpClient` — no reflection, no bytecode manipulation
 
 ### **Groovy-First Design**

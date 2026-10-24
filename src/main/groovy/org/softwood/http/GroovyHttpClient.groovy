@@ -231,6 +231,8 @@ class GroovyHttpClient implements AutoCloseable {
         private java.security.KeyStore trustStore
         private javax.net.ssl.KeyManager[] keyManagers
         private Integer maxRedirects
+        private Object httpVersion
+        private Http3Discovery http3Discovery
 
         Builder(String baseUrl) { this.baseUrl = baseUrl }
 
@@ -257,6 +259,13 @@ class GroovyHttpClient implements AutoCloseable {
         Builder trustStore(java.security.KeyStore ks) { this.trustStore = ks; this }
         /** Client certificate(s) for mutual TLS. */
         Builder keyManagers(javax.net.ssl.KeyManager[] kms) { this.keyManagers = kms; this }
+        /** Preferred HTTP version: an {@link HttpVersion} or a name such as 'HTTP/1.1', 'HTTP_2', 'HTTP/3'. */
+        Builder httpVersion(Object v) { this.httpVersion = v; this }
+        /**
+         * Use HTTP/3 (JDK 26+), with the given discovery mode (default {@link Http3Discovery#ANY}: fall back to
+         * HTTP/2 when the server or the network doesn't do QUIC).
+         */
+        Builder http3(Http3Discovery mode = Http3Discovery.ANY) { this.http3Discovery = mode; this.httpVersion = HttpVersion.HTTP_3; this }
 
         GroovyHttpClient build() {
             def cfg = new SecurityConfig([
@@ -280,7 +289,9 @@ class GroovyHttpClient implements AutoCloseable {
                     sslContext                 : sslContext,
                     trustStore                 : trustStore,
                     keyManagers                : keyManagers,
-                    maxRedirects               : maxRedirects
+                    maxRedirects               : maxRedirects,
+                    httpVersion                : httpVersion,
+                    http3Discovery             : http3Discovery
             ])
             new GroovyHttpClient(cfg)
         }
@@ -297,6 +308,14 @@ class GroovyHttpClient implements AutoCloseable {
      * (Before 2.0.0 this used the trust-all testing profile.)
      */
     GroovyHttpClient(String baseUrl) { this(SecurityConfig.defaults(baseUrl)) }
+
+    /** True when the running JDK supports HTTP/3 in java.net.http (JDK 26+, JEP 517). */
+    static boolean isHttp3Available() { Http3Support.isAvailable() }
+
+    /** The HTTP version this client prefers on this JDK, after any HTTP/3 fallback. */
+    HttpVersion getHttpVersion() { effectiveHttpVersion }
+
+    private final HttpVersion effectiveHttpVersion
 
     GroovyHttpClient(SecurityConfig config) {
         if (config == null) throw new IllegalArgumentException("SecurityConfig is required")
@@ -323,10 +342,21 @@ class GroovyHttpClient implements AutoCloseable {
 
         this.executor = Executors.newThreadPerTaskExecutor(tf)
 
+        HttpClient.Version jdkVersion = Http3Support.toJdk(config.httpVersion ?: HttpVersion.HTTP_2)
+        if (jdkVersion == null) {
+            // HTTP_3 requested on a JDK without it (< 26)
+            if (config.http3Discovery == Http3Discovery.HTTP_3_URI_ONLY) {
+                throw new IllegalStateException("HTTP/3-only (Http3Discovery.HTTP_3_URI_ONLY) requires JDK 26 or later; running Java ${Runtime.version()}")
+            }
+            log.warn("[GroovyHttpClient] HTTP/3 requested but this JDK ({}) has no HTTP/3 support (needs 26+); using HTTP/2", Runtime.version())
+            jdkVersion = HttpClient.Version.HTTP_2
+        }
+        this.effectiveHttpVersion = Http3Support.fromJdk(jdkVersion)
+
         def b = HttpClient.newBuilder()
                 .executor(executor)
                 .connectTimeout(config.connectTimeout ?: DEFAULT_CONNECT_TIMEOUT)
-                .version(HttpClient.Version.HTTP_2)
+                .version(jdkVersion)
                 // Redirects are followed by sendFollowingRedirects so every hop is checked against
                 // allowedHosts (SEC-3); the JDK client must never follow them itself.
                 .followRedirects(HttpClient.Redirect.NEVER)
@@ -377,7 +407,6 @@ class GroovyHttpClient implements AutoCloseable {
 
         SSLParameters sslParams = new SSLParameters()
         sslParams.setEndpointIdentificationAlgorithm(config.enforceHostnameVerification ? "HTTPS" : null)
-        sslParams.setApplicationProtocols(["h2", "http/1.1"] as String[])
 
         if (config.allowedTlsProtocols) sslParams.setProtocols(config.allowedTlsProtocols as String[])
         if (config.allowedCipherSuites) sslParams.setCipherSuites(config.allowedCipherSuites as String[])
@@ -416,6 +445,8 @@ class GroovyHttpClient implements AutoCloseable {
         private Duration timeoutOverride
         private HttpClient.Version versionOverride
         private boolean expectContinueOverride = false
+        private HttpVersion httpVersionOverride
+        private Http3Discovery http3DiscoveryOverride
 
         private HttpRequest.BodyPublisher bodyPublisher = null
         private String bodyContentType = null
@@ -442,6 +473,16 @@ class GroovyHttpClient implements AutoCloseable {
 
         /** Per-request HTTP version preference. */
         GroovyRequestBuilder version(HttpClient.Version v) { versionOverride = v; this }
+
+        /** Per-request HTTP version preference using the library enum (HTTP_3 needs JDK 26+; falls back to HTTP_2). */
+        GroovyRequestBuilder httpVersion(HttpVersion v) { httpVersionOverride = v; this }
+
+        /** Use HTTP/3 for this request, with the given discovery mode (default ANY). */
+        GroovyRequestBuilder http3(Http3Discovery mode = Http3Discovery.ANY) {
+            httpVersionOverride = HttpVersion.HTTP_3
+            http3DiscoveryOverride = mode
+            this
+        }
 
         /** Send 'Expect: 100-continue' for this request. */
         GroovyRequestBuilder expectContinue(boolean enable) { expectContinueOverride = enable; this }
@@ -523,9 +564,24 @@ class GroovyHttpClient implements AutoCloseable {
          * a methodMissing forwarded unknown calls to a builder that was never sent; unknown DSL calls
          * now fail with MissingMethodException instead of being silently dropped.
          */
-        HttpRequest.Builder applyTo(HttpRequest.Builder b, Duration defaultTimeout) {
+        HttpRequest.Builder applyTo(HttpRequest.Builder b, Duration defaultTimeout,
+                                    HttpVersion clientVersion = null, Http3Discovery clientDiscovery = null) {
             b.timeout(timeoutOverride ?: defaultTimeout)
             if (versionOverride != null) b.version(versionOverride)
+            HttpVersion effective = httpVersionOverride ?: clientVersion
+            Http3Discovery discovery = http3DiscoveryOverride ?: clientDiscovery
+            if (httpVersionOverride != null) {
+                def v = Http3Support.toJdk(httpVersionOverride)
+                if (v == null) {   // per-request HTTP/3 on a JDK without it
+                    if (discovery == Http3Discovery.HTTP_3_URI_ONLY) {
+                        throw new IllegalStateException("HTTP/3-only request requires JDK 26 or later; running Java ${Runtime.version()}")
+                    }
+                    v = HttpClient.Version.HTTP_2
+                    effective = HttpVersion.HTTP_2
+                }
+                b.version(v)
+            }
+            if (effective == HttpVersion.HTTP_3 && discovery != null) Http3Support.applyDiscovery(b, discovery)
             if (expectContinueOverride) b.expectContinue(true)
             getHeaders().each { k, vs -> vs.each { v -> b.header(k, v) } }
             b
@@ -549,8 +605,11 @@ class GroovyHttpClient implements AutoCloseable {
         final int statusCode
         final String contentType
         final Charset charset
+        /** The protocol version the exchange actually used (e.g. HTTP_3 when QUIC was negotiated). */
+        final HttpVersion httpVersion
 
         HttpClientResponse(HttpResponse<byte[]> response) {
+            this.httpVersion = Http3Support.fromJdk(response.version())
             this.bytes = response.body() ?: new byte[0]
             this.headers = response.headers().map()
             this.statusCode = response.statusCode()
@@ -836,7 +895,7 @@ class GroovyHttpClient implements AutoCloseable {
         def requestSupplier = { ->
             HttpRequest.Builder b = HttpRequest.newBuilder().uri(finalUri)
             // C-1: replay the per-request DSL settings (timeout, version, expectContinue, headers)
-            wrapped.applyTo(b, config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT)
+            wrapped.applyTo(b, config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT, effectiveHttpVersion, config.http3Discovery)
 
             switch (method.toUpperCase()) {
                 case "GET":     b.GET(); break
@@ -875,8 +934,8 @@ class GroovyHttpClient implements AutoCloseable {
             sendFollowingRedirects(req, 0)
                     .thenApply { HttpResponse<byte[]> resp ->
                         if (config.enableLogging) {
-                            log.info("[GroovyHttpClient] {} {} -> {} in {} ms (attempt {})", ctx.method, loggableUri(resp.uri()),
-                                    resp.statusCode(), (System.nanoTime() - started).intdiv(1_000_000L), ctx.attempt)
+                            log.info("[GroovyHttpClient] {} {} -> {} in {} ms (attempt {}, {})", ctx.method, loggableUri(resp.uri()),
+                                    resp.statusCode(), (System.nanoTime() - started).intdiv(1_000_000L), ctx.attempt, resp.version())
                         }
                         // byte-accurate maxResponseBytes
                         if (maxResponseBytes != Long.MAX_VALUE && resp.body() != null && resp.body().length > maxResponseBytes) {
@@ -1292,7 +1351,7 @@ class GroovyHttpClient implements AutoCloseable {
 
         def reqSupplier = { ->
             HttpRequest.Builder b = HttpRequest.newBuilder().uri(uri)
-            wrapped.applyTo(b, config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT)
+            wrapped.applyTo(b, config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT, effectiveHttpVersion, config.http3Discovery)
             b.POST(pub).build()
         }
 

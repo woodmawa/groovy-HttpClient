@@ -249,6 +249,14 @@ def config = SecurityConfig.production("https://api.example.com")
 |`maxRedirects`
 |`Integer`
 |Maximum redirect hops (default 5); more raises `RedirectRejectedException`
+
+|`httpVersion`
+|`HttpVersion` (or `'HTTP/1.1'`, `'HTTP_2'`, `'HTTP/3'`)
+|Preferred protocol, default `HTTP_2`. `HTTP_3` needs JDK 26+ and TLSv1.3; otherwise falls back to HTTP/2 (see <<http3>>)
+
+|`http3Discovery`
+|`Http3Discovery`
+|`ANY`, `ALT_SVC` or `HTTP_3_URI_ONLY`; setting it implies `httpVersion: HTTP_3`
 |===
 
 [[redirect-policy]]

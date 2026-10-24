@@ -238,7 +238,9 @@ def response = client.getSync("/search") {
 |`cookie(name, value)` / `cookies(Map)` |Send cookies; names and values are validated against RFC 6265
 |`form(Map)` / `json(obj)` |Set a URL-encoded or JSON body and its Content-Type
 |`timeout(Duration)` |Override the configured request timeout
-|`version(HttpClient.Version)` |Prefer an HTTP version
+|`version(HttpClient.Version)` |Prefer an HTTP version (JDK enum)
+|`httpVersion(HttpVersion)` |Prefer an HTTP version (library enum; `HTTP_3` falls back to HTTP/2 on JDK < 26)
+|`http3(Http3Discovery)` |Use HTTP/3 for this request (default discovery `ANY`)
 |`expectContinue(boolean)` |Send `Expect: 100-continue`
 |`retry { ... }` |Override the retry policy
 |===
@@ -443,6 +445,65 @@ def response3 = client.getSync("/slow-report") {
 ====
 Setting very long timeouts can cause resource exhaustion under load. Use judiciously and consider circuit breaker implications.
 ====
+
+[[http3]]
+== HTTP/3
+
+On JDK 26 and later, the client can talk HTTP/3 (QUIC over UDP) using the JDK's own implementation (JEP 517). The library is compiled for Java 25 and detects HTTP/3 at runtime, so the same jar runs everywhere:
+
+[source,groovy]
+----
+if (GroovyHttpClient.http3Available) {        // true on JDK 26+
+    println "HTTP/3 supported"
+}
+----
+
+=== Turning it on
+
+[source,groovy]
+----
+import org.softwood.http.Http3Discovery
+
+// Whole client: prefer HTTP/3, fall back to HTTP/2 when the server or network doesn't do QUIC
+def client = GroovyHttpClient.builder("https://cloudflare.com")
+        .http3()                                   // = http3(Http3Discovery.ANY)
+        .build()
+
+// Same via configuration
+def cfg = SecurityConfig.production("https://cloudflare.com")
+        .withOverrides(http3Discovery: Http3Discovery.ALT_SVC)   // implies httpVersion HTTP_3
+
+// One request only
+def resp = client.getSync("/cdn-cgi/trace") { http3(Http3Discovery.HTTP_3_URI_ONLY) }
+
+println resp.httpVersion      // HttpVersion.HTTP_3 when QUIC was used
+----
+
+.Discovery modes
+[cols="1,3"]
+|===
+|Mode |Behaviour
+
+|`ANY` (default for `http3()`)
+|Attempt HTTP/3 and HTTP/2 (or HTTP/1.1) together and use whichever connects. Falls back silently.
+
+|`ALT_SVC`
+|Start on HTTP/2 or HTTP/1.1 and switch to HTTP/3 once the server advertises it with an `Alt-Svc` header. The most conservative choice for general traffic.
+
+|`HTTP_3_URI_ONLY`
+|HTTP/3 only. No fallback: if nothing answers over QUIC the request fails. A client configured this way refuses to build on JDK < 26 (`IllegalStateException`).
+|===
+
+=== Behaviour on older JDKs
+
+On JDK 25, `http3()` / `httpVersion: HTTP_3` logs one WARN and uses HTTP/2; `client.httpVersion` reports what the client really uses. Only `HTTP_3_URI_ONLY` is an error, because you asked for HTTP/3 and nothing else.
+
+=== Security and networking notes
+
+* HTTP/3 always uses TLS 1.3, so `TLSv1.3` must be in `allowedTlsProtocols` (a configuration without it is refused). Certificate verification, `trustStore` / `keyManagers`, `allowedHosts`, redirects and every other policy apply exactly as for HTTP/2.
+* QUIC runs over UDP. Corporate firewalls and some proxies block UDP 443; with `ANY` or `ALT_SVC` the client then simply stays on HTTP/2. With `HTTP_3_URI_ONLY` the request fails.
+* HTTP/3 is not used through an HTTP proxy.
+* `response.httpVersion` tells you which protocol an exchange actually used, and `enableLogging` includes it in each request line.
 
 == Response Handling
 

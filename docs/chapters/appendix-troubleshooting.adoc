@@ -58,6 +58,14 @@
 |No SLF4J binding on the classpath (2.0.0 no longer ships logback), or the `org.softwood.http.GroovyHttpClient` logger is above INFO.
 |Add a binding such as `logback-classic` and configure the logger level.
 
+|`IllegalStateException: HTTP/3-only ... requires JDK 26`
+|`Http3Discovery.HTTP_3_URI_ONLY` on a JDK without HTTP/3.
+|Run on JDK 26+, or use `ANY` / `ALT_SVC`, which fall back to HTTP/2.
+
+|`response.httpVersion` is `HTTP_2` although `http3()` is set
+|JDK < 26 (see the WARN at client creation), the server doesn't offer HTTP/3, or UDP 443 is blocked (common behind corporate firewalls).
+|Expected fallback with `ANY` / `ALT_SVC`. To check the path, try `HTTP_3_URI_ONLY` against the server.
+
 |`No Awaitable adapter found for type ...` in your own Groovy 6 code
 |A method of yours named `await(...)` is shadowed by Groovy 6's built-in `await`.
 |Rename the method.

@@ -11,10 +11,10 @@ pluginManagement {
 }
 
 dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    // D-8: Central only. mavenLocal() could let a stale or tampered local artifact shadow Central in a release build.
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         mavenCentral()
-        mavenLocal()
     }
 }
 

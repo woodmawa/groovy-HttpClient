@@ -31,6 +31,10 @@ jetty-alpn-java      = { module = "org.eclipse.jetty:jetty-alpn-java-server",   
 jetty-http2-server   = { module = "org.eclipse.jetty.http2:jetty-http2-server",   version.ref = "jetty" }
 jetty-http2-common   = { module = "org.eclipse.jetty.http2:jetty-http2-common",   version.ref = "jetty" }
 jetty-ee10-servlet   = { module = "org.eclipse.jetty.ee10:jetty-ee10-servlet",    version.ref = "jetty" }
+# HTTP/3 test server (QUIC via Cloudflare quiche, FFM binding)
+jetty-http3-server   = { module = "org.eclipse.jetty.http3:jetty-http3-server",   version.ref = "jetty" }
+jetty-quiche-server  = { module = "org.eclipse.jetty.quic:jetty-quic-quiche-server", version.ref = "jetty" }
+jetty-quiche-foreign = { module = "org.eclipse.jetty.quic:jetty-quic-quiche-foreign", version.ref = "jetty" }
 
 [plugins]
 asciidoctor-convert  = { id = "org.asciidoctor.jvm.convert",          version.ref = "asciidoctor" }

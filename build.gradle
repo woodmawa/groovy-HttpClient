@@ -1,5 +1,6 @@
 plugins {
     id 'groovy'
+    id 'java-library'   // api vs implementation -> correct compile/runtime scopes in the published POM
     id 'maven-publish'
     id 'signing'
     alias(libs.plugins.asciidoctor.convert)
@@ -16,11 +17,9 @@ def buildJdk    = 27
 def bytecodeJdk = 25
 
 group = 'io.github.woodmawa'  // Or 'io.github.woodmawa' if using GitHub-based group
-version = '2.0.0-SNAPSHOT'  // 2.0.0: Groovy 6, Java 25 floor, security behaviour changes (see docs/reviews)
+version = '2.0.0'  // Groovy 6, Java 25 floor, HTTP/3, security behaviour changes (see docs/chapters/12-upgrading-2.0.adoc)
 
-repositories {
-    mavenCentral()
-}
+// repositories are declared once, in settings.gradle
 
 java {
     toolchain {
@@ -33,7 +32,8 @@ java {
 }
 
 dependencies {
-    implementation libs.groovy
+    // groovy.lang.Closure is in nearly every public signature, so Groovy is part of the API (POM scope compile)
+    api libs.groovy
     implementation libs.groovy.json
     implementation libs.groovy.xml
     implementation libs.slf4j.api
@@ -51,6 +51,11 @@ dependencies {
     testImplementation libs.jetty.http2.server
     testImplementation libs.jetty.http2.common
     testImplementation libs.jetty.ee10.servlet
+
+    // HTTP/3 end-to-end tests (JDK 26+ client <-> Jetty QUIC server)
+    testImplementation libs.jetty.http3.server
+    testImplementation libs.jetty.quiche.server
+    testImplementation libs.jetty.quiche.foreign
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -64,6 +69,11 @@ tasks.withType(GroovyCompile).configureEach {
 
 test {
     useJUnitPlatform()
+}
+
+// The HTTP/3 test server loads Cloudflare quiche through the FFM API (jetty-quic-quiche-foreign)
+tasks.withType(Test).configureEach {
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
 }
 
 // Same suite on the consumer floor runtime
@@ -95,9 +105,14 @@ javadoc {
 // Groovydoc is automatically created by the groovy plugin
 // Configure it instead of registering a new one
 groovydoc {
-    // Optional: customize groovydoc settings
-    // docTitle = "Groovy HTTP Client API"
-    // windowTitle = "Groovy HTTP Client API"
+    docTitle = "Groovy HTTP Client ${project.version} API"
+    windowTitle = "Groovy HTTP Client ${project.version} API"
+}
+
+// D-7: the project is Groovy-only, so javadoc is NO-SOURCE and withJavadocJar() would publish an empty
+// -javadoc.jar. Maven Central needs real API docs in that artifact: package the Groovydoc output instead.
+tasks.named('javadocJar', Jar) {
+    from tasks.named('groovydoc')
 }
 
 // Publishing configuration for Maven Central
@@ -235,5 +250,23 @@ asciidoctorPdf {
             'source-highlighter': 'rouge',
             'version': project.version,
             'backend': 'pdf'
+    ]
+}
+
+// DocBook output: the source for docs/index.docx (converted with pandoc: docbook -> docx)
+tasks.register('asciidoctorDocbook', org.asciidoctor.gradle.jvm.AsciidoctorTask) {
+    group = 'documentation'
+    description = 'Renders docs/index.adoc to DocBook 5 (input for the .docx edition).'
+    sourceDir = file('docs')
+    sources {
+        include 'index.adoc'
+    }
+    outputDir = file('build/docs/docbook')
+    baseDirFollowsSourceDir()
+    outputOptions {
+        backends = ['docbook']
+    }
+    attributes = [
+            'version': project.version
     ]
 }

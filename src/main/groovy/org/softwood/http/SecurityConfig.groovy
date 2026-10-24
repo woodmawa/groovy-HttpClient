@@ -76,6 +76,12 @@ class SecurityConfig {
     final boolean allowRedirects
     final int maxRedirects
 
+    // Protocol
+    /** Preferred HTTP version (default HTTP_2). HTTP_3 needs JDK 26+ at runtime; otherwise the client falls back to HTTP_2. */
+    final HttpVersion httpVersion
+    /** HTTP/3 discovery mode; null = JDK default. Setting it implies httpVersion HTTP_3. */
+    final Http3Discovery http3Discovery
+
     // Resilience
     final int failureThreshold
     final long resetTimeoutMs
@@ -99,7 +105,8 @@ class SecurityConfig {
             'baseUrl', 'connectTimeout', 'requestTimeout', 'insecureAllowed', 'allowAbsoluteUrls', 'maxResponseBytes',
             'cookiePolicy', 'allowedHosts', 'enableLogging', 'enableMetrics', 'allowRedirects', 'maxRedirects',
             'failureThreshold', 'resetTimeoutMs', 'retryPolicy', 'enforceHostnameVerification', 'allowedTlsProtocols',
-            'allowedCipherSuites', 'sslContext', 'trustStore', 'trustManagers', 'keyManagers'
+            'allowedCipherSuites', 'sslContext', 'trustStore', 'trustManagers', 'keyManagers',
+            'httpVersion', 'http3Discovery'
     ] as LinkedHashSet<String>).asImmutable()
 
     /**
@@ -132,6 +139,9 @@ class SecurityConfig {
         this.enableMetrics               = opt(a, 'enableMetrics', true) as boolean
         this.allowRedirects              = opt(a, 'allowRedirects', true) as boolean
         this.maxRedirects                = opt(a, 'maxRedirects', DEFAULT_MAX_REDIRECTS) as int
+        this.http3Discovery              = toEnum(Http3Discovery, opt(a, 'http3Discovery', null))
+        this.httpVersion                 = toEnum(HttpVersion, opt(a, 'httpVersion',
+                http3Discovery != null ? HttpVersion.HTTP_3 : HttpVersion.HTTP_2))
 
         this.failureThreshold            = opt(a, 'failureThreshold', GroovyHttpClient.DEFAULT_FAILURE_THRESHOLD) as int
         this.resetTimeoutMs              = opt(a, 'resetTimeoutMs', GroovyHttpClient.DEFAULT_RESET_TIMEOUT_MS) as long
@@ -159,6 +169,12 @@ class SecurityConfig {
         }
         this.sslContext = suppliedSslContext ?: (customMaterial ? buildSslContext(trustStore, trustManagers, keyManagers) : null)
 
+        if (http3Discovery != null && httpVersion != HttpVersion.HTTP_3) {
+            throw new IllegalArgumentException("http3Discovery requires httpVersion HTTP_3 (was ${httpVersion})")
+        }
+        if (httpVersion == HttpVersion.HTTP_3 && !allowedTlsProtocols.contains('TLSv1.3')) {
+            throw new IllegalArgumentException("HTTP/3 (QUIC) requires TLSv1.3 in allowedTlsProtocols: ${allowedTlsProtocols}")
+        }
         if (maxResponseBytes <= 0) throw new IllegalArgumentException("maxResponseBytes must be > 0 (use Long.MAX_VALUE for no limit)")
         if (maxRedirects < 0) throw new IllegalArgumentException("maxRedirects must be >= 0")
     }
@@ -173,6 +189,18 @@ class SecurityConfig {
         SSLContext ctx = SSLContext.getInstance('TLS')
         ctx.init(keyManagers, tms, null)   // null trust managers = JVM default trust (e.g. mTLS to a public-CA server)
         ctx
+    }
+
+    /** Accepts the enum itself or a name such as 'HTTP_3', 'http/3', 'HTTP/1.1', 'alt_svc'. */
+    private static <E extends Enum<E>> E toEnum(Class<E> type, Object value) {
+        if (value == null) return null
+        if (type.isInstance(value)) return (E) value
+        String n = value.toString().trim().toUpperCase(Locale.ROOT).replace('/', '_').replace('.', '_').replace('-', '_')
+        try {
+            return Enum.valueOf(type, n)
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Invalid ${type.simpleName}: '${value}'. Valid: ${type.enumConstants*.name()}")
+        }
     }
 
     private static Object opt(Map a, String key, Object dflt) {
@@ -283,6 +311,8 @@ class SecurityConfig {
                 enableMetrics              : enableMetrics,
                 allowRedirects             : allowRedirects,
                 maxRedirects               : maxRedirects,
+                httpVersion                : httpVersion,
+                http3Discovery             : http3Discovery,
                 failureThreshold           : failureThreshold,
                 resetTimeoutMs             : resetTimeoutMs,
                 retryPolicy                : retryPolicy,
@@ -306,6 +336,10 @@ class SecurityConfig {
             merged.remove('allowedHosts')
         }
         merged.putAll((overrides ?: [:]) as Map<String, Object>)
+        // asking for a discovery mode means HTTP/3, even on a profile whose httpVersion is HTTP_2
+        if (overrides?.get('http3Discovery') != null && !overrides.containsKey('httpVersion')) {
+            merged.httpVersion = HttpVersion.HTTP_3
+        }
         new SecurityConfig(merged)
     }
 }

@@ -22,6 +22,10 @@ dependencies {
 }
 ----
 
+== New: HTTP/3
+
+On JDK 26+ the client can use HTTP/3 (QUIC): `builder(url).http3()`, `withOverrides(http3Discovery: ...)` or per request `{ http3() }`. It is off by default, so nothing changes unless you ask for it. On JDK 25 a request for HTTP/3 falls back to HTTP/2. See <<http3>>.
+
 == Behaviour Changes
 
 === The String constructor verifies TLS certificates
