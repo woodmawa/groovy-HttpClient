@@ -2,6 +2,7 @@ package org.softwood.http
 
 import groovy.util.logging.Slf4j
 
+import javax.net.ssl.SSLContext
 import java.time.Duration
 
 /*
@@ -19,172 +20,39 @@ import java.time.Duration
  */
 
 /**
- * SecurityConfig — Centralized configuration for all runtime security, TLS, URL/host policies,
- * request timeouts, cookie behavior, and risk controls used by {@link org.softwood.http.GroovyHttpClient}.
+ * SecurityConfig -- immutable configuration for TLS, host policy (SSRF protection), redirects,
+ * timeouts, cookies, response-size limits and resilience used by {@link GroovyHttpClient}.
  *
- * <p>
- * The class provides a declarative, environment-aware way to configure an HTTP client:
- * production, staging, testing, or fully custom modes. It consolidates protocol rules, network
- * validation, body-size limits, virtual-thread behavior, optional "trust-all" insecure testing mode,
- * circuit-breaker tuning, and host allow-list controls (SSRF protection).
- * </p>
- *
- * <h2>Primary Responsibilities</h2>
+ * <h2>Profiles</h2>
  * <ul>
- *   <li><strong>TLS and hostname verification policies</strong></li>
- *   <li><strong>Cookie acceptance rules</strong> (via {@link java.net.CookiePolicy})</li>
- *   <li><strong>Allow-listing of target hosts</strong> to prevent SSRF</li>
- *   <li><strong>Absolute URL enable/disable</strong> control</li>
- *   <li><strong>Request and connection timeout control</strong></li>
- *   <li><strong>Maximum response body size</strong> for safety against unbounded downloads</li>
- *   <li><strong>Circuit breaker configuration</strong>: failure thresholds and reset time</li>
- *   <li><strong>Insecure TLS override</strong> for tests (trust-all, disabled hostname verification)</li>
- *   <li><strong>Logging and debugging flags</strong> for staging setups</li>
+ *   <li>{@link #defaults(String)} -- what {@code new GroovyHttpClient(baseUrl)} uses. Certificates and host
+ *       names verified, TLS 1.3 and 1.2, absolute URLs off, redirects followed only to allowed hosts,
+ *       no automatic retries.</li>
+ *   <li>{@link #production(String)} -- as defaults, plus TLS 1.3 only, tighter timeouts and retries of
+ *       idempotent requests on I/O errors, timeouts and 5xx.</li>
+ *   <li>{@link #staging(String)} -- production with logging and a longer request timeout.</li>
+ *   <li>{@link #testing(String, SSLContext)} -- for tests against local servers: absolute URLs and all
+ *       cookies accepted, no retries. Certificates are STILL verified -- pass an {@link SSLContext} built
+ *       from your test trust store to talk to a self-signed test server.</li>
+ *   <li>{@link #trustAll(String)} -- disables certificate and host-name verification. Local development
+ *       only. This is the only profile that does.</li>
  * </ul>
  *
- * <h2>Environment Profiles</h2>
- * <p>This class offers ready-made profiles:</p>
- * <ul>
- *   <li>{@code SecurityConfig.production(baseUrl)}
- *     <ul>
- *       <li>TLS enforced</li>
- *       <li>Hostname verification enabled</li>
- *       <li>Absolute URLs disabled (SSRF protection)</li>
- *       <li>CookiePolicy = ACCEPT_ORIGINAL_SERVER</li>
- *       <li>Strict body-size and timeout rules</li>
- *     </ul>
- *   </li>
+ * <h2>Overrides</h2>
+ * Any profile can be adjusted with {@link #withOverrides(Map)}. An explicitly supplied value always wins,
+ * including {@code false} and {@code 0} -- e.g. {@code withOverrides(allowRedirects: false)}. Changing
+ * {@code baseUrl} without supplying {@code allowedHosts} re-derives the allow-list from the new base URL.
  *
- *   <li>{@code SecurityConfig.staging(baseUrl)}
- *     <ul>
- *       <li>TLS enforced</li>
- *       <li>More verbose logging</li>
- *       <li>Moderate body-size limit</li>
- *       <li>Absolute URLs allowed if whitelisted</li>
- *     </ul>
- *   </li>
- *
- *   <li>{@code SecurityConfig.testing(baseUrl)}
- *     <ul>
- *       <li>Insecure TLS allowed (trust-all)</li>
- *       <li>Absolute URLs allowed</li>
- *       <li>CookiePolicy = ACCEPT_ALL</li>
- *       <li>Generous timeouts</li>
- *       <li>Host allow-list wide-open for mock/test servers</li>
- *     </ul>
- *   </li>
- * </ul>
- *
- * <h2>Custom Configuration</h2>
- * <p>
- * Any profile may be modified using:
- * </p>
- *
- * <pre>{@code
- * def cfg = SecurityConfig.production("https://api.example.com")
- *              .withOverrides([
- *                  requestTimeout : Duration.ofSeconds(10),
- *                  enableLogging  : true,
- *                  allowAbsoluteUrls: false
- *              ])
- * }</pre>
- *
- * <p>
- * All properties are immutable by default. {@code withOverrides} returns a new, adjusted config instance.
- * </p>
- *
- * <h2>Properties</h2>
- * <ul>
- *   <li><strong>baseUrl</strong> — root URL the client is anchored to</li>
- *   <li><strong>allowAbsoluteUrls</strong> — enable/disable raw absolute URLs</li>
- *   <li><strong>allowedHosts</strong> — list of valid target hosts (SSRF mitigation)</li>
- *   <li><strong>cookiePolicy</strong> — acceptance behavior for cookies</li>
- *   <li><strong>connectTimeout</strong> — handshake timeout</li>
- *   <li><strong>requestTimeout</strong> — per-request timeout</li>
- *   <li><strong>maxResponseBytes</strong> — safety limit for response bodies</li>
- *   <li><strong>failureThreshold</strong> — number of failures before circuit opens</li>
- *   <li><strong>resetTimeoutMs</strong> — cooling-off period for circuit breaker</li>
- *   <li><strong>insecureAllowed</strong> — trust-all mode for test/dev</li>
- *   <li><strong>enableLogging</strong> — request/response visibility</li>
- * </ul>
- *
- * <h2>Interaction with GroovyHttpClient</h2>
- * <p>
- * When a {@link SecurityConfig} is passed to {@link org.softwood.http.GroovyHttpClient#GroovyHttpClient(SecurityConfig)},
- * the client adopts:
- * </p>
- *
- * <ul>
- *   <li>TLS rules and hostname verification</li>
- *   <li>Host allow-list enforcement</li>
- *   <li>Absolute URL rules</li>
- *   <li>Cookie manager behavior</li>
- *   <li>Circuit breaker threshold & reset timing</li>
- *   <li>Response body-size limits</li>
- *   <li>Logging settings</li>
- *   <li>Trust-all SSL override (if configured)</li>
- * </ul>
- *
- * <p>
- * This ensures identical behavior across environments with no code changes.
- * </p>
- *
- * <h2>Usage Example</h2>
- * <pre>{@code
- * def cfg = SecurityConfig.production("https://internal.api")
- *              .withOverrides(enableLogging: true)
- *
- * def client = new GroovyHttpClient(cfg)
- *
- * def resp = client.getSync("/heartbeat")
- * }</pre>
- *
- * <h2>Recommended Production Settings</h2>
- * <ul>
- *   <li>TLSv1.3 only</li>
- *   <li>insecureAllowed = false</li>
- *   <li>allowAbsoluteUrls = false</li>
- *   <li>cookiePolicy = CookiePolicy.ACCEPT_ORIGINAL_SERVER</li>
- *   <li>maxResponseBytes = 10 MB or less</li>
- *   <li>requestTimeout ≤ 30 seconds</li>
- *   <li>connectTimeout ≤ 5 seconds</li>
- * </ul>
- *
- * @author
- *   Will Woodman / Softwood Consulting Ltd
- * @since 1.4.0
- */
-
-/**
- * Centralized security configuration for GroovyHttpClient.
- * Defines safe defaults and environment-specific overrides
- * for production, staging, or local testing.
- *
- * Use this with GroovyHttpClientBuilder:
- *
- *   def cfg = SecurityConfig.production()
- *   def client = new GroovyHttpClientBuilder(cfg.baseUrl)
- *       .connectTimeout(cfg.connectTimeout)
- *       .requestTimeout(cfg.requestTimeout)
- *       .cookiePolicy(cfg.cookiePolicy)
- *       .allowAbsoluteUrls(cfg.allowAbsoluteUrls)
- *       .maxResponseBytes(cfg.maxResponseBytes)
- *       .insecureAllowed(cfg.insecureAllowed)
- *       .build()
- *
- * Provides safe defaults for production, staging, testing, and local development.
- * This class is immutable; helper factory methods enable easy profile selection.
- *
- * Profiles:
- *   - production() : Strict, safe, TLS-only, no insecure connections.
- *   - staging()    : Similar to prod but with logging enabled.
- *   - testing()    : Allows insecure connections, accepts all cookies.
- *   - trustAll()   : For local dev & unit testing; disables all TLS verification.
- *
- * All fields are final and supplied via the internal map-based constructor.
+ * @author Will Woodman / Softwood Consulting Ltd
+ * @since 1.0.0 (profiles reworked in 2.0.0)
  */
 @Slf4j
 class SecurityConfig {
+
+    static final Duration DEFAULT_CONNECT_TIMEOUT = Duration.ofSeconds(10)
+    static final Duration DEFAULT_REQUEST_TIMEOUT = Duration.ofSeconds(30)
+    static final long DEFAULT_MAX_RESPONSE_BYTES  = 10_000_000L
+    static final int DEFAULT_MAX_REDIRECTS        = 5
 
     // Core
     final String baseUrl
@@ -198,6 +66,7 @@ class SecurityConfig {
     final boolean enableLogging
     final boolean enableMetrics
     final boolean allowRedirects
+    final int maxRedirects
 
     // Resilience
     final int failureThreshold
@@ -208,28 +77,68 @@ class SecurityConfig {
     final boolean enforceHostnameVerification
     final List<String> allowedTlsProtocols
     final List<String> allowedCipherSuites
+    /** Optional SSLContext for verified TLS (e.g. a test or private-CA trust store). Null = JVM default. */
+    final SSLContext sslContext
 
-    private SecurityConfig(Map args) {
-        this.baseUrl                     = args.baseUrl
-        this.connectTimeout              = (Duration) args.connectTimeout ?: Duration.ofSeconds(10)
-        this.requestTimeout              = (Duration) args.requestTimeout ?: Duration.ofSeconds(30)
-        this.insecureAllowed             = (args.insecureAllowed ?: false) as boolean
-        this.allowAbsoluteUrls           = (args.allowAbsoluteUrls ?: false) as boolean
-        this.maxResponseBytes            = (Long) args.maxResponseBytes ?: 10_000_000L
-        this.cookiePolicy                = args.cookiePolicy as CookiePolicy ?: CookiePolicy.ACCEPT_ORIGINAL_SERVER
-        this.allowedHosts                = (Set) args.allowedHosts ?: [URI.create(baseUrl).host] as Set
-        this.enableLogging               = (args.enableLogging ?: false) as boolean
-        this.enableMetrics               = (args.enableMetrics ?: true) as boolean
-        this.allowRedirects              = (args.allowRedirects ?: true) as boolean
+    /**
+     * Map-based constructor used by the profiles, {@link GroovyHttpClient.Builder} and {@link #withOverrides}.
+     * A key that is present with a non-null value is honoured as given; absent or null means the default.
+     * (Before 2.0.0 Groovy truth was used, so an explicit {@code false} or {@code 0} silently became the default.)
+     */
+    protected SecurityConfig(Map args) {
+        Map a = args ?: [:]
+        this.baseUrl                     = a.baseUrl as String
+        if (!baseUrl || !(baseUrl.startsWith('http://') || baseUrl.startsWith('https://'))) {
+            throw new IllegalArgumentException("baseUrl must be an absolute http(s) URL: ${baseUrl}")
+        }
+        this.connectTimeout              = opt(a, 'connectTimeout', DEFAULT_CONNECT_TIMEOUT) as Duration
+        this.requestTimeout              = opt(a, 'requestTimeout', DEFAULT_REQUEST_TIMEOUT) as Duration
+        this.insecureAllowed             = opt(a, 'insecureAllowed', false) as boolean
+        this.allowAbsoluteUrls           = opt(a, 'allowAbsoluteUrls', false) as boolean
+        this.maxResponseBytes            = opt(a, 'maxResponseBytes', DEFAULT_MAX_RESPONSE_BYTES) as long
+        this.cookiePolicy                = opt(a, 'cookiePolicy', CookiePolicy.ACCEPT_ORIGINAL_SERVER) as CookiePolicy
+        this.allowedHosts                = Collections.unmodifiableSet(
+                ((opt(a, 'allowedHosts', [URI.create(baseUrl).host]) as Collection<String>)
+                        .collect { normalizeHost(it) }.findAll { it } as LinkedHashSet<String>))
+        this.enableLogging               = opt(a, 'enableLogging', false) as boolean
+        this.enableMetrics               = opt(a, 'enableMetrics', true) as boolean
+        this.allowRedirects              = opt(a, 'allowRedirects', true) as boolean
+        this.maxRedirects                = opt(a, 'maxRedirects', DEFAULT_MAX_REDIRECTS) as int
 
-        this.failureThreshold            = (Integer) args.failureThreshold ?: 5
-        this.resetTimeoutMs              = (Long) args.resetTimeoutMs ?: 30_000L
+        this.failureThreshold            = opt(a, 'failureThreshold', GroovyHttpClient.DEFAULT_FAILURE_THRESHOLD) as int
+        this.resetTimeoutMs              = opt(a, 'resetTimeoutMs', GroovyHttpClient.DEFAULT_RESET_TIMEOUT_MS) as long
+        this.retryPolicy                 = opt(a, 'retryPolicy', GroovyHttpClient.RetryPolicy.none()) as GroovyHttpClient.RetryPolicy
 
-        this.retryPolicy                 = (GroovyHttpClient.RetryPolicy) args.retryPolicy ?: GroovyHttpClient.RetryPolicy.none()
+        this.enforceHostnameVerification = opt(a, 'enforceHostnameVerification', true) as boolean
+        this.allowedTlsProtocols         = Collections.unmodifiableList(
+                (opt(a, 'allowedTlsProtocols', ['TLSv1.3', 'TLSv1.2']) as List<String>).collect { it as String })
+        this.allowedCipherSuites         = Collections.unmodifiableList(
+                (opt(a, 'allowedCipherSuites', []) as List<String>).collect { it as String })
+        this.sslContext                  = opt(a, 'sslContext', null) as SSLContext
 
-        this.enforceHostnameVerification = (args.enforceHostnameVerification != null) ? (args.enforceHostnameVerification as boolean) : true
-        this.allowedTlsProtocols         = (List<String>) args.allowedTlsProtocols ?: ["TLSv1.3"]
-        this.allowedCipherSuites         = (List<String>) args.allowedCipherSuites ?: []
+        if (maxResponseBytes <= 0) throw new IllegalArgumentException("maxResponseBytes must be > 0 (use Long.MAX_VALUE for no limit)")
+        if (maxRedirects < 0) throw new IllegalArgumentException("maxRedirects must be >= 0")
+        if (insecureAllowed && sslContext != null) {
+            throw new IllegalArgumentException("insecureAllowed and sslContext are mutually exclusive")
+        }
+    }
+
+    private static Object opt(Map a, String key, Object dflt) {
+        (a.containsKey(key) && a[key] != null) ? a[key] : dflt
+    }
+
+    static String normalizeHost(String h) {
+        if (!h) return null
+        String s = h.trim().toLowerCase(Locale.ROOT)
+        while (s.endsWith('.')) s = s[0..-2]
+        // URI.getHost() returns IPv6 literals in brackets
+        if (s.startsWith('[') && s.endsWith(']')) s = s[1..-2]
+        s ?: null
+    }
+
+    /** Safe general-purpose defaults; used by {@code new GroovyHttpClient(String)}. */
+    static SecurityConfig defaults(String baseUrl) {
+        new SecurityConfig([baseUrl: baseUrl])
     }
 
     static SecurityConfig production(String baseUrl = "https://example.com") {
@@ -241,7 +150,7 @@ class SecurityConfig {
                 enforceHostnameVerification: true,
                 connectTimeout             : Duration.ofSeconds(5),
                 requestTimeout             : Duration.ofSeconds(20),
-                maxResponseBytes           : 10_000_000L,
+                maxResponseBytes           : DEFAULT_MAX_RESPONSE_BYTES,
                 allowedTlsProtocols        : ["TLSv1.3"],
                 enableLogging              : false,
                 enableMetrics              : true,
@@ -257,25 +166,31 @@ class SecurityConfig {
 
     static SecurityConfig staging(String baseUrl = "https://staging.example.com") {
         production(baseUrl).withOverrides([
-                enableLogging: true,
+                enableLogging : true,
                 requestTimeout: Duration.ofSeconds(30)
         ])
     }
 
-    static SecurityConfig testing(String baseUrl = "http://localhost:8080") {
+    /**
+     * For tests against local / mock servers. Certificates are verified: pass an SSLContext built from
+     * the test trust store to reach a self-signed HTTPS test server, or use {@link #trustAll(String)}.
+     */
+    static SecurityConfig testing(String baseUrl = "http://localhost:8080", SSLContext testSslContext = null) {
         new SecurityConfig([
                 baseUrl          : baseUrl,
-                insecureAllowed  : true,
+                insecureAllowed  : false,
+                sslContext       : testSslContext,
                 allowAbsoluteUrls: true,
                 cookiePolicy     : CookiePolicy.ACCEPT_ALL,
                 enableLogging    : true,
                 enableMetrics    : false,
                 retryPolicy      : new GroovyHttpClient.RetryPolicy.Config().tap {
-                    maxAttempts(1) // default: no retries in tests unless explicitly enabled per request
+                    maxAttempts(1) // no retries in tests unless enabled per request
                 }.build()
         ])
     }
 
+    /** Disables certificate and host-name verification. Local development only -- never production. */
     static SecurityConfig trustAll(String baseUrl = "http://localhost:8080") {
         new SecurityConfig([
                 baseUrl                    : baseUrl,
@@ -301,7 +216,41 @@ class SecurityConfig {
         ])
     }
 
+    /** Every setting as a map, in the shape the constructor accepts. */
+    Map<String, Object> toMap() {
+        [
+                baseUrl                    : baseUrl,
+                connectTimeout             : connectTimeout,
+                requestTimeout             : requestTimeout,
+                insecureAllowed            : insecureAllowed,
+                allowAbsoluteUrls          : allowAbsoluteUrls,
+                maxResponseBytes           : maxResponseBytes,
+                cookiePolicy               : cookiePolicy,
+                allowedHosts               : allowedHosts,
+                enableLogging              : enableLogging,
+                enableMetrics              : enableMetrics,
+                allowRedirects             : allowRedirects,
+                maxRedirects               : maxRedirects,
+                failureThreshold           : failureThreshold,
+                resetTimeoutMs             : resetTimeoutMs,
+                retryPolicy                : retryPolicy,
+                enforceHostnameVerification: enforceHostnameVerification,
+                allowedTlsProtocols        : allowedTlsProtocols,
+                allowedCipherSuites        : allowedCipherSuites,
+                sslContext                 : sslContext
+        ] as Map<String, Object>
+    }
+
+    /**
+     * Copy with overrides. Explicit values win (including false / 0). A new baseUrl without an explicit
+     * allowedHosts re-derives the allow-list from the new host rather than keeping the old one.
+     */
     SecurityConfig withOverrides(Map overrides) {
-        new SecurityConfig(this.properties + overrides)
+        Map<String, Object> merged = toMap()
+        if (overrides?.containsKey('baseUrl') && !overrides.containsKey('allowedHosts')) {
+            merged.remove('allowedHosts')
+        }
+        merged.putAll((overrides ?: [:]) as Map<String, Object>)
+        new SecurityConfig(merged)
     }
 }

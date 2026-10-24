@@ -1,6 +1,7 @@
 package org.softwood.http
 
 import groovy.json.JsonSlurper
+import groovy.transform.CompileStatic
 import groovy.transform.Immutable
 import groovy.transform.ImmutableOptions
 import groovy.util.logging.Slf4j
@@ -14,12 +15,15 @@ import javax.net.ssl.X509TrustManager
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.ByteBuffer
 import java.nio.charset.Charset
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
+import java.util.concurrent.CompletionStage
+import java.util.concurrent.Flow
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
@@ -220,9 +224,11 @@ class GroovyHttpClient implements AutoCloseable {
         private int failureThreshold = 5
         private long resetTimeoutMs = 30_000L
         private boolean enforceHostnameVerification = true
-        private List<String> allowedTlsProtocols = ["TLSv1.3"]
+        private List<String> allowedTlsProtocols        // null = SecurityConfig default (TLS 1.3 + 1.2)
         private List<String> allowedCipherSuites = []
         private RetryPolicy retryPolicy
+        private SSLContext sslContext
+        private Integer maxRedirects
 
         Builder(String baseUrl) { this.baseUrl = baseUrl }
 
@@ -242,6 +248,9 @@ class GroovyHttpClient implements AutoCloseable {
         Builder allowedTlsProtocols(List<String> protocols) { this.allowedTlsProtocols = protocols; this }
         Builder allowedCipherSuites(List<String> suites) { this.allowedCipherSuites = suites; this }
         Builder retryPolicy(RetryPolicy policy) { this.retryPolicy = policy; this }
+        /** Verified TLS against this context's trust material (private CA, test trust store). */
+        Builder sslContext(SSLContext ctx) { this.sslContext = ctx; this }
+        Builder maxRedirects(int hops) { this.maxRedirects = hops; this }
 
         GroovyHttpClient build() {
             def cfg = new SecurityConfig([
@@ -261,7 +270,9 @@ class GroovyHttpClient implements AutoCloseable {
                     enforceHostnameVerification: enforceHostnameVerification,
                     allowedTlsProtocols        : allowedTlsProtocols,
                     allowedCipherSuites        : allowedCipherSuites,
-                    retryPolicy                : retryPolicy
+                    retryPolicy                : retryPolicy,
+                    sslContext                 : sslContext,
+                    maxRedirects               : maxRedirects
             ])
             new GroovyHttpClient(cfg)
         }
@@ -273,12 +284,14 @@ class GroovyHttpClient implements AutoCloseable {
      * Construction
      * ========================================================================= */
 
-    GroovyHttpClient(String baseUrl) { this(SecurityConfig.testing(baseUrl)) }
+    /**
+     * Client with {@link SecurityConfig#defaults(String)}: certificates and host names verified.
+     * (Before 2.0.0 this used the trust-all testing profile.)
+     */
+    GroovyHttpClient(String baseUrl) { this(SecurityConfig.defaults(baseUrl)) }
 
     GroovyHttpClient(SecurityConfig config) {
-        if (!config?.baseUrl || !config.baseUrl.startsWith("http")) {
-            throw new IllegalArgumentException("Invalid base URL in SecurityConfig: ${config?.baseUrl}")
-        }
+        if (config == null) throw new IllegalArgumentException("SecurityConfig is required")
 
         this.config = config
         this.host = URI.create(config.baseUrl)
@@ -290,8 +303,9 @@ class GroovyHttpClient implements AutoCloseable {
         )
 
         this.allowAbsoluteUrls = !!config.allowAbsoluteUrls
-        this.allowedHosts = Collections.synchronizedSet(new LinkedHashSet<>(config.allowedHosts ?: [host.host]))
-        this.allowedHosts.add(this.host.host)
+        Set<String> hosts = new LinkedHashSet<String>(config.allowedHosts ?: [] as Set<String>)
+        hosts.add(SecurityConfig.normalizeHost(this.host.host))
+        this.allowedHosts = Collections.unmodifiableSet(hosts)
 
         this.maxResponseBytes = config.maxResponseBytes ?: 10_000_000L
 
@@ -305,7 +319,9 @@ class GroovyHttpClient implements AutoCloseable {
                 .executor(executor)
                 .connectTimeout(config.connectTimeout ?: DEFAULT_CONNECT_TIMEOUT)
                 .version(HttpClient.Version.HTTP_2)
-                .followRedirects(config.allowRedirects ? HttpClient.Redirect.NORMAL : HttpClient.Redirect.NEVER)
+                // Redirects are followed by sendFollowingRedirects so every hop is checked against
+                // allowedHosts (SEC-3); the JDK client must never follow them itself.
+                .followRedirects(HttpClient.Redirect.NEVER)
                 .cookieHandler(cookieManager)
                 .proxy(ProxySelector.getDefault())
 
@@ -335,7 +351,7 @@ class GroovyHttpClient implements AutoCloseable {
         sslParams.setEndpointIdentificationAlgorithm(config.enforceHostnameVerification ? "HTTPS" : null)
 
         baseBuilder.sslParameters(sslParams)
-        baseBuilder.sslContext(SSLContext.getDefault())
+        baseBuilder.sslContext(config.sslContext ?: SSLContext.getDefault())
         baseBuilder.build()
     }
 
@@ -368,7 +384,7 @@ class GroovyHttpClient implements AutoCloseable {
     static class SimpleCookieHandler {
         private final Map<String, String> cookies = new java.util.concurrent.ConcurrentHashMap<>()
 
-        void addCookie(String name, String value) { cookies[name] = value }
+        void addCookie(String name, String value) { Cookies.validate(name, value); cookies[name] = value }
         void removeCookie(String name) { cookies.remove(name) }
         void clear() { cookies.clear() }
 
@@ -388,6 +404,10 @@ class GroovyHttpClient implements AutoCloseable {
         private final Map<String, List<String>> headers = new ConcurrentHashMap<String, List<String>>()
         private final Map<String, List<String>> queryParams = new ConcurrentHashMap<String, List<String>>()
         private RetryPolicy retryOverride
+        // C-1: per-request settings recorded here and replayed onto every (re)built request
+        private Duration timeoutOverride
+        private HttpClient.Version versionOverride
+        private boolean expectContinueOverride = false
 
         private HttpRequest.BodyPublisher bodyPublisher = null
         private String bodyContentType = null
@@ -403,13 +423,31 @@ class GroovyHttpClient implements AutoCloseable {
             headers.keySet().any { it.equalsIgnoreCase(name) }
         }
 
-        GroovyRequestBuilder timeout(Duration duration) { builder.timeout(duration); this }
+        /** Per-request timeout; overrides SecurityConfig.requestTimeout for this request only. */
+        GroovyRequestBuilder timeout(Duration duration) {
+            if (duration == null || duration.isZero() || duration.isNegative()) {
+                throw new IllegalArgumentException("timeout must be a positive duration")
+            }
+            timeoutOverride = duration
+            this
+        }
 
-        void cookie(String name, String value) { header("Cookie", "${name}=${value}") }
+        /** Per-request HTTP version preference. */
+        GroovyRequestBuilder version(HttpClient.Version v) { versionOverride = v; this }
+
+        /** Send 'Expect: 100-continue' for this request. */
+        GroovyRequestBuilder expectContinue(boolean enable) { expectContinueOverride = enable; this }
+
+        /** Replace any value of this header set so far (default headers included). */
+        void setHeader(String name, String value) {
+            headers.keySet().removeIf { String k -> k.equalsIgnoreCase(name) }
+            header(name, value)
+        }
+
+        void cookie(String name, String value) { header("Cookie", Cookies.pair(name, value)) }
 
         void cookies(Map<String, String> cookies) {
-            def cookieString = cookies.collect { k, v -> "${k}=${v}" }.join("; ")
-            header("Cookie", cookieString)
+            header("Cookie", cookies.collect { k, v -> Cookies.pair(k, v) }.join("; "))
         }
 
         /** query a:1, b:'two' */
@@ -468,7 +506,22 @@ class GroovyHttpClient implements AutoCloseable {
         HttpRequest.BodyPublisher getBodyPublisherOrNull() { bodyPublisher }
         String getBodyContentTypeOrNull() { bodyContentType }
 
-        def methodMissing(String name, args) { builder."$name"(*args) }
+        Duration getTimeoutOrNull() { timeoutOverride }
+        HttpClient.Version getVersionOrNull() { versionOverride }
+
+        /**
+         * Apply what the DSL recorded to a fresh request builder. Every attempt (retries, and the
+         * initial send) is built through here, so nothing set in the DSL is lost (C-1). Before 2.0.0
+         * a methodMissing forwarded unknown calls to a builder that was never sent; unknown DSL calls
+         * now fail with MissingMethodException instead of being silently dropped.
+         */
+        HttpRequest.Builder applyTo(HttpRequest.Builder b, Duration defaultTimeout) {
+            b.timeout(timeoutOverride ?: defaultTimeout)
+            if (versionOverride != null) b.version(versionOverride)
+            if (expectContinueOverride) b.expectContinue(true)
+            getHeaders().each { k, vs -> vs.each { v -> b.header(k, v) } }
+            b
+        }
 
         HttpRequest.Builder unwrap() { builder }
 
@@ -762,12 +815,9 @@ class GroovyHttpClient implements AutoCloseable {
         }
 
         def requestSupplier = { ->
-            HttpRequest.Builder b = HttpRequest.newBuilder()
-                    .uri(finalUri)
-                    .timeout(config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT)
-
-            // copy headers from wrapped (already applied to rb, but we rebuild for retries)
-            wrapped.getHeaders().each { k, vs -> vs.each { v -> b.header(k, v) } }
+            HttpRequest.Builder b = HttpRequest.newBuilder().uri(finalUri)
+            // C-1: replay the per-request DSL settings (timeout, version, expectContinue, headers)
+            wrapped.applyTo(b, config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT)
 
             switch (method.toUpperCase()) {
                 case "GET":     b.GET(); break
@@ -795,28 +845,23 @@ class GroovyHttpClient implements AutoCloseable {
 
         // Circuit breaker gates the overall operation
         return executeWithCircuitBreaker {
-            attemptWithRetry(ctx, chain)
+            attemptWithRetry(ctx, chain).thenApply { HttpClientResponse r -> raiseForStatus(r) }
         }
     }
 
     private Closure<CompletableFuture<HttpClientResponse>> buildInterceptorChain() {
         Closure<CompletableFuture<HttpClientResponse>> terminal = { RequestContext ctx ->
             HttpRequest req = ctx.requestSupplier.call()
-            httpClient.sendAsync(req, HttpResponse.BodyHandlers.ofByteArray())
+            sendFollowingRedirects(req, 0)
                     .thenApply { HttpResponse<byte[]> resp ->
                         // byte-accurate maxResponseBytes
                         if (maxResponseBytes != Long.MAX_VALUE && resp.body() != null && resp.body().length > maxResponseBytes) {
                             throw new HttpResponseException(413, "Body too large (>${maxResponseBytes} bytes)")
                         }
 
-                        def response = new HttpClientResponse(resp)
-
-                        // IMPORTANT: preserve old behavior expected by specs — throw on HTTP errors
-                        if (response.statusCode >= 400) {
-                            throw new HttpResponseException(response.statusCode, response.body)
-                        }
-
-                        response
+                        // >= 400 is raised AFTER retry (raiseForStatus), so status-based retry can see the
+                        // response (SEC-4). Interceptors now receive 4xx/5xx responses rather than exceptions.
+                        new HttpClientResponse(resp)
                     }
         }
 
@@ -845,95 +890,51 @@ class GroovyHttpClient implements AutoCloseable {
             RequestContext ctx,
             Closure<CompletableFuture<HttpClientResponse>> chain
     ) {
-        // iterative async retry
         def attempt = new AtomicInteger(1)
         def promise = new CompletableFuture<HttpClientResponse>()
+        RetryPolicy policy = ctx.retryPolicy
+        // SEC-10: POST / PATCH are retried only when the policy opts in with retryNonIdempotent
+        boolean retryable = policy != null && policy.maxAttempts > 1 && policy.allowsMethod(ctx.method)
 
-        def doAttempt
+        Closure doAttempt
         doAttempt = { ->
             ctx.attempt = attempt.get()
-            chain.call(ctx).whenComplete { resp, err ->
-                if (err == null) {
-                    promise.complete(resp)
-                    return
-                }
-
-                Throwable cause = unwrapCompletion(err)
-                if (ctx.retryPolicy == null || ctx.retryPolicy.maxAttempts <= 1) {
-                    promise.completeExceptionally(cause)
-                    return
-                }
-
-                boolean shouldRetry = ctx.retryPolicy.shouldRetry(cause, null)
-                if (!shouldRetry) {
-                    promise.completeExceptionally(cause)
-                    return
-                }
-
-                if (attempt.get() >= ctx.retryPolicy.maxAttempts) {
-                    promise.completeExceptionally(cause)
-                    return
-                }
-
-                long delayMs = ctx.retryPolicy.nextDelayMs(attempt.get())
-                attempt.incrementAndGet()
-
-                // schedule delay on virtual thread executor
-                CompletableFuture.runAsync({
-                    try { Thread.sleep(delayMs) } catch (InterruptedException ignored) {}
-                }, executor).thenRun(doAttempt)
-            }
-        }
-
-        // Special case: retry based on *response status* requires reading response
-        // We implement that by wrapping chain result once, then optionally rescheduling.
-        def doAttemptWithStatus
-        doAttemptWithStatus = { ->
-            ctx.attempt = attempt.get()
-            chain.call(ctx).whenComplete { resp, err ->
-                if (err == null) {
-                    // status-based retry
-                    if (ctx.retryPolicy != null
-                            && ctx.retryPolicy.maxAttempts > 1
-                            && ctx.retryPolicy.shouldRetry(null, resp)
-                            && attempt.get() < ctx.retryPolicy.maxAttempts) {
-
-                        long delayMs = ctx.retryPolicy.nextDelayMs(attempt.get())
-                        attempt.incrementAndGet()
-                        CompletableFuture.runAsync({
-                            try { Thread.sleep(delayMs) } catch (InterruptedException ignored) {}
-                        }, executor).thenRun(doAttemptWithStatus)
-                        return
-                    }
-                    promise.complete(resp)
-                    return
-                }
-
-                Throwable cause = unwrapCompletion(err)
-                if (ctx.retryPolicy != null
-                        && ctx.retryPolicy.maxAttempts > 1
-                        && ctx.retryPolicy.shouldRetry(cause, null)
-                        && attempt.get() < ctx.retryPolicy.maxAttempts) {
-
-                    long delayMs = ctx.retryPolicy.nextDelayMs(attempt.get())
+            chain.call(ctx).whenComplete { HttpClientResponse resp, Throwable err ->
+                Throwable cause = (err == null) ? null : unwrapCompletion(err)
+                // SEC-4: the chain now returns 4xx/5xx responses, so status-code retry can actually fire
+                boolean again = retryable && attempt.get() < policy.maxAttempts &&
+                        (cause == null ? policy.shouldRetry(null, resp) : policy.shouldRetry(cause, null))
+                if (again) {
+                    long delayMs = policy.nextDelayMs(attempt.get())
                     attempt.incrementAndGet()
-                    CompletableFuture.runAsync({
-                        try { Thread.sleep(delayMs) } catch (InterruptedException ignored) {}
-                    }, executor).thenRun(doAttemptWithStatus)
+                    CompletableFuture.delayedExecutor(delayMs, TimeUnit.MILLISECONDS, executor as java.util.concurrent.Executor)
+                            .execute { doAttempt.call() }
                     return
                 }
-
-                promise.completeExceptionally(cause)
+                if (cause == null) promise.complete(resp)
+                else promise.completeExceptionally(cause)
             }
         }
 
-        doAttemptWithStatus.call()
+        doAttempt.call()
         promise
+    }
+
+    private static HttpClientResponse raiseForStatus(HttpClientResponse r) {
+        if (r.statusCode >= 400) throw new HttpResponseException(r.statusCode, r.body)
+        r
     }
 
     private static Throwable unwrapCompletion(Throwable t) {
         Throwable cause = t
-        while (cause instanceof CompletionException && cause.cause != null) cause = cause.cause
+        while (cause != null) {
+            if (cause instanceof CompletionException && cause.cause != null) { cause = cause.cause; continue }
+            // The JDK client wraps a BodySubscriber failure in IOException. Our own exceptions (e.g. the
+            // 413 from BoundedBodySubscriber) must surface as themselves, not as a retryable I/O error.
+            if (cause instanceof IOException && (cause.cause instanceof HttpResponseException ||
+                    cause.cause instanceof RedirectRejectedException)) { cause = cause.cause; continue }
+            break
+        }
         cause
     }
 
@@ -960,11 +961,123 @@ class GroovyHttpClient implements AutoCloseable {
         URI.create(base + p)
     }
 
-    private static String normalizeHost(String h) {
-        if (!h) return null
-        def s = h.trim().toLowerCase(Locale.ROOT)
-        while (s.endsWith(".")) s = s[0..-2]
-        s
+    private static String normalizeHost(String h) { SecurityConfig.normalizeHost(h) }
+
+    /* =========================================================================
+     * Redirects (SEC-3 / SEC-12): followed here, never by the JDK client, so every
+     * hop is policy-checked and credentials do not cross origins
+     * ========================================================================= */
+
+    private static final Set<Integer> REDIRECT_CODES = [301, 302, 303, 307, 308] as Set<Integer>
+    private static final Set<String> CREDENTIAL_HEADERS = ['authorization', 'proxy-authorization', 'cookie'] as Set<String>
+
+    private CompletableFuture<HttpResponse<byte[]>> sendFollowingRedirects(HttpRequest req, int hop) {
+        httpClient.sendAsync(req, boundedBodyHandler()).thenCompose { HttpResponse<byte[]> resp ->
+            if (!config.allowRedirects || !REDIRECT_CODES.contains(resp.statusCode())) {
+                return CompletableFuture.completedFuture(resp)
+            }
+            Optional<String> location = resp.headers().firstValue('Location')
+            if (!location.isPresent()) {
+                return CompletableFuture.completedFuture(resp)
+            }
+            if (hop >= config.maxRedirects) {
+                throw new RedirectRejectedException("Too many redirects (more than ${config.maxRedirects}) from ${req.uri()}")
+            }
+            URI target = req.uri().resolve(location.get().trim())
+            checkRedirectTarget(req.uri(), target)
+            return sendFollowingRedirects(redirectRequest(req, target, resp.statusCode()), hop + 1)
+        } as CompletableFuture<HttpResponse<byte[]>>
+    }
+
+    private void checkRedirectTarget(URI from, URI to) {
+        String scheme = to.scheme?.toLowerCase(Locale.ROOT)
+        if (!(scheme in ['http', 'https'])) {
+            throw new RedirectRejectedException("Redirect to unsupported scheme refused: ${to}")
+        }
+        if ('https'.equalsIgnoreCase(from.scheme) && scheme == 'http') {
+            throw new RedirectRejectedException("Redirect from HTTPS to HTTP refused: ${to}")
+        }
+        String h = normalizeHost(to.host)
+        if (!h || !allowedHosts.contains(h)) {
+            throw new RedirectRejectedException("Redirect target host not allowed: ${to.host}")
+        }
+    }
+
+    private static int effectivePort(URI u) {
+        u.port != -1 ? u.port : ('https'.equalsIgnoreCase(u.scheme) ? 443 : 80)
+    }
+
+    private static boolean sameOrigin(URI a, URI b) {
+        a.scheme?.equalsIgnoreCase(b.scheme) &&
+                normalizeHost(a.host) == normalizeHost(b.host) &&
+                effectivePort(a) == effectivePort(b)
+    }
+
+    /** 303 (and 301/302 after POST) become GET without a body, as browsers and the JDK do; 307/308 keep method and body. */
+    private static HttpRequest redirectRequest(HttpRequest prev, URI target, int status) {
+        String method = prev.method()
+        boolean toGet = (status == 303 && method != 'HEAD') || ((status == 301 || status == 302) && method == 'POST')
+        boolean crossOrigin = !sameOrigin(prev.uri(), target)
+        HttpRequest.Builder b = HttpRequest.newBuilder(prev, { String name, String value ->
+            String n = name.toLowerCase(Locale.ROOT)
+            if (crossOrigin && CREDENTIAL_HEADERS.contains(n)) return false
+            if (toGet && (n == 'content-type' || n == 'content-length')) return false
+            return true
+        } as java.util.function.BiPredicate<String, String>).uri(target)
+        if (toGet) b.GET()
+        b.build()
+    }
+
+    /* =========================================================================
+     * Bounded response bodies (SEC-5): stop reading once maxResponseBytes is crossed
+     * ========================================================================= */
+
+    private HttpResponse.BodyHandler<byte[]> boundedBodyHandler() {
+        long max = maxResponseBytes
+        return { HttpResponse.ResponseInfo info -> new BoundedBodySubscriber(max) } as HttpResponse.BodyHandler<byte[]>
+    }
+
+    @CompileStatic
+    static class BoundedBodySubscriber implements HttpResponse.BodySubscriber<byte[]> {
+        private final long max
+        private final CompletableFuture<byte[]> result = new CompletableFuture<byte[]>()
+        private final ByteArrayOutputStream buffer = new ByteArrayOutputStream()
+        private Flow.Subscription subscription
+        private long received = 0L
+
+        BoundedBodySubscriber(long max) { this.max = max }
+
+        @Override
+        CompletionStage<byte[]> getBody() { result }
+
+        @Override
+        void onSubscribe(Flow.Subscription s) {
+            this.subscription = s
+            s.request(Long.MAX_VALUE)
+        }
+
+        @Override
+        void onNext(List<ByteBuffer> items) {
+            if (result.isDone()) return
+            for (ByteBuffer bb : items) {
+                int n = bb.remaining()
+                received += n
+                if (max != Long.MAX_VALUE && received > max) {
+                    subscription.cancel()
+                    result.completeExceptionally(new HttpResponseException(413, 'Response body exceeds maxResponseBytes (' + max + ')'))
+                    return
+                }
+                byte[] chunk = new byte[n]
+                bb.get(chunk)
+                buffer.write(chunk, 0, n)
+            }
+        }
+
+        @Override
+        void onError(Throwable t) { result.completeExceptionally(t) }
+
+        @Override
+        void onComplete() { result.complete(buffer.toByteArray()) }
     }
 
     private static URI appendQueryParams(URI uri, Map<String, List<String>> params) {
@@ -1049,7 +1162,7 @@ class GroovyHttpClient implements AutoCloseable {
         parts.each { MultipartPart part ->
             def header =
                     "--${boundary}\r\n" +
-                            "Content-Disposition: form-data; name=\"${part.name}\"; filename=\"${part.filename}\"\r\n" +
+                            "Content-Disposition: form-data; name=\"${MultipartPart.quote(part.name)}\"; filename=\"${MultipartPart.quote(part.filename)}\"\r\n" +
                             "Content-Type: ${part.contentType}\r\n" +
                             "\r\n"
             byteArrays << header.getBytes("UTF-8")
@@ -1136,8 +1249,8 @@ class GroovyHttpClient implements AutoCloseable {
         def pub = buildMultipartBody(parts, boundary)
 
         def reqSupplier = { ->
-            HttpRequest.Builder b = HttpRequest.newBuilder().uri(uri).timeout(config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT)
-            wrapped.getHeaders().each { k, vs -> vs.each { v -> b.header(k, v) } }
+            HttpRequest.Builder b = HttpRequest.newBuilder().uri(uri)
+            wrapped.applyTo(b, config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT)
             b.POST(pub).build()
         }
 
@@ -1147,12 +1260,8 @@ class GroovyHttpClient implements AutoCloseable {
         def chain = buildInterceptorChain()
 
         executeWithCircuitBreaker {
-            attemptWithRetry(ctx, chain).thenApply { resp ->
-                // IMPORTANT: do NOT treat all 4xx as breaker failures; callers can decide.
-                // Preserve existing behavior by throwing on >=400 (but breaker will only count transient/5xx).
-                if (resp.statusCode >= 400) throw new HttpResponseException(resp.statusCode, resp.body)
-                resp
-            }
+            // >= 400 raised after retry; the breaker counts only transient errors and 5xx
+            attemptWithRetry(ctx, chain).thenApply { HttpClientResponse r -> raiseForStatus(r) }
         }
     }
 
@@ -1184,7 +1293,15 @@ class GroovyHttpClient implements AutoCloseable {
 
     @Override
     void close() {
-        try { executor?.close() } catch (ignored) {}
+        // SEC-9: close the JDK client too (selector thread, pooled connections), with a bounded wait
+        try {
+            httpClient.shutdown()
+            if (!httpClient.awaitTermination(Duration.ofSeconds(5))) httpClient.shutdownNow()
+        } catch (InterruptedException ie) {
+            httpClient.shutdownNow()
+            Thread.currentThread().interrupt()
+        } catch (ignored) { }
+        try { executor?.close() } catch (ignored) { }
     }
 
     String toString(path = '/') { resolveUri(path).toString() }
@@ -1203,8 +1320,17 @@ class GroovyHttpClient implements AutoCloseable {
         boolean retryOnTimeout
         Set<Integer> retryStatusCodes
 
+        /** SEC-10: retry non-idempotent methods (POST, PATCH, CONNECT) too. Off by default. */
+        boolean retryNonIdempotent
+
+        private static final Set<String> IDEMPOTENT = ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE', 'TRACE'] as Set<String>
+
         static RetryPolicy none() {
-            new RetryPolicy(1, 0, 0, false, false, false, Collections.emptySet() as Set<Integer>)
+            new RetryPolicy(1, 0, 0, false, false, false, Collections.emptySet() as Set<Integer>, false)
+        }
+
+        boolean allowsMethod(String method) {
+            retryNonIdempotent || IDEMPOTENT.contains(method?.toUpperCase(Locale.ROOT))
         }
 
         static class Config  {
@@ -1215,6 +1341,10 @@ class GroovyHttpClient implements AutoCloseable {
             boolean retryOnIOException = true
             boolean retryOnTimeout = true
             Set<Integer> retryStatusCodes = ([500,502,503,504] as Set<Integer>)
+            boolean retryNonIdempotent = false
+
+            /** Also retry POST / PATCH. Only safe when the server de-duplicates (e.g. an Idempotency-Key). */
+            void retryNonIdempotent(boolean enabled = true) { this.retryNonIdempotent = enabled }
 
             void maxAttempts(int n) { this.maxAttempts = Math.max(1, n) }
             void backoffExponential(long initialMs = 200, long maxMs = 2_000, boolean jitter = true) {
@@ -1230,7 +1360,8 @@ class GroovyHttpClient implements AutoCloseable {
             }
 
             RetryPolicy build() {
-                new RetryPolicy(maxAttempts, initialDelayMs, maxDelayMs, jitter, retryOnIOException, retryOnTimeout, retryStatusCodes ?: (Collections.emptySet() as Set<Integer>))
+                new RetryPolicy(maxAttempts, initialDelayMs, maxDelayMs, jitter, retryOnIOException, retryOnTimeout,
+                        retryStatusCodes ?: (Collections.emptySet() as Set<Integer>), retryNonIdempotent)
             }
         }
 
@@ -1282,6 +1413,8 @@ class GroovyHttpClient implements AutoCloseable {
         private final int failureThreshold
         private final long resetTimeoutMs
         private final AtomicInteger failureCount = new AtomicInteger(0)
+        /** SEC-8: exactly one caller may hold the HALF_OPEN probe slot. */
+        private final AtomicBoolean probeInFlight = new AtomicBoolean(false)
 
         // for spec visibility + time logic
         private volatile long openStateTime = 0L
@@ -1301,38 +1434,40 @@ class GroovyHttpClient implements AutoCloseable {
         }
 
         /** Spec helper: after timeout, allow a HALF_OPEN probe */
-        boolean canAttemptProbe() {
+        synchronized boolean canAttemptProbe() {
             if (System.currentTimeMillis() - lastFailureTime > resetTimeoutMs) {
-                state = State.HALF_OPEN
+                if (state != State.HALF_OPEN) {
+                    state = State.HALF_OPEN
+                    probeInFlight.set(false)
+                }
                 return true
             }
             false
         }
 
         /** Spec helper */
-        void recordSuccess() {
+        synchronized void recordSuccess() {
             failureCount.set(0)
             openStateTime = 0L
             state = State.CLOSED
+            probeInFlight.set(false)
         }
 
         /** Spec helper: opens after threshold; HALF_OPEN failure re-opens immediately */
-        void recordFailure() {
+        synchronized void recordFailure() {
             int currentFailures = failureCount.incrementAndGet()
             lastFailureTime = System.currentTimeMillis()
 
-            if (currentFailures >= failureThreshold) {
+            // threshold reached, or the HALF_OPEN probe failed: (re)open
+            if (currentFailures >= failureThreshold || state == State.HALF_OPEN) {
                 openStateTime = System.currentTimeMillis()
                 state = State.OPEN
-            } else if (state == State.HALF_OPEN) {
-                // probe failed: reopen immediately
-                openStateTime = System.currentTimeMillis()
-                state = State.OPEN
+                probeInFlight.set(false)
             }
         }
 
         /** Spec helper: auto-reset after timeout */
-        boolean isOpen() {
+        synchronized boolean isOpen() {
             if (openStateTime > 0L) {
                 if (System.currentTimeMillis() - openStateTime > resetTimeoutMs) {
                     reset()
@@ -1344,20 +1479,22 @@ class GroovyHttpClient implements AutoCloseable {
         }
 
         /** Spec helper */
-        void reset() {
+        synchronized void reset() {
             failureCount.set(0)
             openStateTime = 0L
             // keep lastFailureTime for probe logic if spec checks it; otherwise OK
             state = State.CLOSED
+            probeInFlight.set(false)
         }
 
         // --- Methods used by GroovyHttpClient runtime path (keep your existing calls working) ---
 
         boolean tryAcquirePermission() {
-            if (state == State.OPEN) {
-                return canAttemptProbe()  // moves to HALF_OPEN if timed out
-            }
-            true
+            State s = state
+            if (s == State.CLOSED) return true
+            if (s == State.OPEN && !canAttemptProbe()) return false   // still cooling down
+            // HALF_OPEN: only the caller that wins the slot proceeds; the rest are rejected until it resolves
+            probeInFlight.compareAndSet(false, true)
         }
 
         void onSuccess() { recordSuccess() }
@@ -1387,14 +1524,71 @@ class GroovyHttpClient implements AutoCloseable {
     }
 
     static class HttpResponseException extends RuntimeException {
+        static final int MESSAGE_BODY_CHARS = 120
         final int statusCode
+        /** The full response body. Kept out of the message (SEC-11) so logging the exception does not log it. */
+        final String responseBody
+
         HttpResponseException(int statusCode, String responseBody) {
-            super("HTTP error: $statusCode, body: $responseBody")
+            super(describe(statusCode, responseBody))
             this.statusCode = statusCode
+            this.responseBody = responseBody
+        }
+
+        private static String describe(int status, String body) {
+            if (!body) return 'HTTP error: ' + status
+            String flat = body.replaceAll(/\p{Cntrl}+/, ' ').trim()
+            String shown = flat.length() > MESSAGE_BODY_CHARS ? flat.substring(0, MESSAGE_BODY_CHARS) + '...' : flat
+            'HTTP error: ' + status + ' (' + body.length() + ' chars), body starts: ' + shown
+        }
+    }
+
+    /** RFC 6265 cookie name / value validation (SEC-7). */
+    @CompileStatic
+    static final class Cookies {
+        private static final String SEPARATORS = '()<>@,;:"/[]?={}'
+
+        static boolean isToken(String s) {
+            if (!s) return false
+            for (int i = 0; i < s.length(); i++) {
+                int c = (int) s.charAt(i)
+                if (c <= 0x20 || c >= 0x7F || c == 0x5C || SEPARATORS.indexOf(c) >= 0) return false
+            }
+            true
+        }
+
+        static boolean isCookieValue(String v) {
+            if (v == null) return false
+            String s = (v.length() >= 2 && v.startsWith('"') && v.endsWith('"')) ? v.substring(1, v.length() - 1) : v
+            for (int i = 0; i < s.length(); i++) {
+                int c = (int) s.charAt(i)
+                boolean ok = c == 0x21 || (c >= 0x23 && c <= 0x2B) || (c >= 0x2D && c <= 0x3A) ||
+                        (c >= 0x3C && c <= 0x5B) || (c >= 0x5D && c <= 0x7E)
+                if (!ok) return false
+            }
+            true
+        }
+
+        static void validate(String name, String value) {
+            if (!isToken(name)) throw new IllegalArgumentException('Invalid cookie name: ' + name)
+            if (!isCookieValue(value)) {
+                throw new IllegalArgumentException("Invalid value for cookie '" + name +
+                        "': only RFC 6265 cookie-octets are allowed (no ; , whitespace, quotes, backslash or control characters)")
+            }
+        }
+
+        static String pair(String name, String value) {
+            validate(name, value)
+            name + '=' + value
         }
     }
 
     static class ContentParseException extends RuntimeException {
         ContentParseException(String message) { super(message) }
+    }
+
+    /** A redirect was refused by policy: host not allowed, HTTPS to HTTP, bad scheme, or too many hops. */
+    static class RedirectRejectedException extends RuntimeException {
+        RedirectRejectedException(String message) { super(message) }
     }
 }

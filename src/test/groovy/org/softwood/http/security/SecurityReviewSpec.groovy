@@ -82,7 +82,6 @@ class SecurityReviewSpec extends Specification {
     // SEC-1 (CRITICAL) -- the one-arg constructor silently disables TLS verification
     // ------------------------------------------------------------------------------------------
 
-    @PendingFeature(reason = 'SEC-1: GroovyHttpClient(String) delegates to SecurityConfig.testing() -> trust-all TLS')
     def "SEC-1 the String constructor must not disable TLS certificate verification"() {
         given: 'the constructor every README / asciidoc quick-start example uses'
         def client = new GroovyHttpClient('https://api.example.com')
@@ -99,7 +98,6 @@ class SecurityReviewSpec extends Specification {
     // ------------------------------------------------------------------------------------------
 
     @Unroll
-    @PendingFeature(reason = 'SEC-2: SecurityConfig uses (x ?: true) so an explicit false is coerced back to true')
     def "SEC-2 an explicit false for #option is honoured via #route"() {
         expect:
         cfg.call(base)."$option" == false
@@ -111,7 +109,6 @@ class SecurityReviewSpec extends Specification {
         'allowRedirects' | 'withOverrides'  | { String b -> SecurityConfig.production('https://api.example.com').withOverrides([allowRedirects: false]) }
     }
 
-    @PendingFeature(reason = 'SEC-2: allowRedirects(false) is ignored, so a 302 is followed')
     def "SEC-2 allowRedirects(false) returns the 3xx instead of following it"() {
         given:
         route('/start') { ex -> reply(ex, 302, '', [Location: '/target']) }
@@ -133,7 +130,6 @@ class SecurityReviewSpec extends Specification {
     // SEC-3 (HIGH) -- redirects bypass the allowedHosts SSRF guard
     // ------------------------------------------------------------------------------------------
 
-    @PendingFeature(reason = 'SEC-3: redirects are followed by the JDK client; allowedHosts is only checked on the initial URI')
     def "SEC-3 a redirect to a host outside allowedHosts is not followed"() {
         given:
         route('/start') { ex -> reply(ex, 302, '', [Location: "http://127.0.0.1:${port}/other".toString()]) }
@@ -168,10 +164,90 @@ class SecurityReviewSpec extends Specification {
     }
 
     // ------------------------------------------------------------------------------------------
+    // SEC-3 / SEC-12 -- behaviour of the library-managed redirect follower (2.0.0)
+    // ------------------------------------------------------------------------------------------
+
+    def "SEC-3 a redirect loop stops at maxRedirects"() {
+        given:
+        route('/loop') { ex -> reply(ex, 302, '', [Location: '/loop']) }
+        def client = GroovyHttpClient.builder(base).maxRedirects(3).build()
+
+        when:
+        client.get('/loop').get(10, TimeUnit.SECONDS)
+
+        then:
+        def e = thrown(ExecutionException)
+        e.cause instanceof GroovyHttpClient.RedirectRejectedException
+        hits['/loop'].get() == 4   // the original request + 3 followed hops
+
+        cleanup:
+        client?.close()
+    }
+
+    @Unroll
+    def "SEC-12 #header is #outcome on a #kind redirect"() {
+        given:
+        String seen = null
+        String targetHost = kind == 'cross-origin' ? '127.0.0.1' : 'localhost'
+        route('/start') { ex -> reply(ex, 302, '', [Location: "http://${targetHost}:${port}/landing".toString()]) }
+        route('/landing') { ex -> seen = ex.requestHeaders.getFirst(header); reply(ex, 200, 'ok') }
+        def client = GroovyHttpClient.builder(base).allowedHosts(['localhost', '127.0.0.1'] as Set).build()
+        client.setHeader(header, 'secret-value')
+
+        when:
+        client.getSync('/start')
+
+        then:
+        (seen == 'secret-value') == kept
+
+        cleanup:
+        client?.close()
+
+        where:
+        header          | kind           | kept
+        'Authorization' | 'cross-origin' | false
+        'Cookie'        | 'cross-origin' | false
+        'Authorization' | 'same-origin'  | true
+        'X-Trace-Id'    | 'cross-origin' | true
+
+        outcome = kept ? 'kept' : 'stripped'
+    }
+
+    @Unroll
+    def "SEC-3 a #status after POST is followed as #expectedMethod"() {
+        given:
+        String method = null
+        String body = null
+        route('/submit') { ex -> reply(ex, status, '', [Location: '/done']) }
+        route('/done') { ex ->
+            method = ex.requestMethod
+            body = ex.requestBody.getText('UTF-8')
+            reply(ex, 200, 'ok')
+        }
+        def client = GroovyHttpClient.builder(base).build()
+
+        when:
+        client.postSync('/submit', 'payload')
+
+        then:
+        method == expectedMethod
+        body == expectedBody
+
+        cleanup:
+        client?.close()
+
+        where:
+        status | expectedMethod | expectedBody
+        303    | 'GET'          | ''
+        302    | 'GET'          | ''
+        307    | 'POST'         | 'payload'
+        308    | 'POST'         | 'payload'
+    }
+
+    // ------------------------------------------------------------------------------------------
     // SEC-4 (MEDIUM, resilience correctness) -- status-code retry is dead code
     // ------------------------------------------------------------------------------------------
 
-    @PendingFeature(reason = 'SEC-4: terminal stage throws HttpResponseException for >=400 before the status-based retry sees the response')
     def "SEC-4 on5xx retry actually retries a 503"() {
         given:
         def calls = new AtomicInteger()
@@ -198,7 +274,6 @@ class SecurityReviewSpec extends Specification {
     // SEC-5 (HIGH, DoS) -- maxResponseBytes is checked only after the whole body is buffered
     // ------------------------------------------------------------------------------------------
 
-    @PendingFeature(reason = 'SEC-5: BodyHandlers.ofByteArray buffers the full body before the size check')
     def "SEC-5 a response larger than maxResponseBytes is aborted while streaming"() {
         given: 'a server that streams without end, throttled so the test cannot exhaust memory'
         route('/endless') { ex ->
@@ -234,7 +309,6 @@ class SecurityReviewSpec extends Specification {
     // ------------------------------------------------------------------------------------------
 
     @Unroll
-    @PendingFeature(reason = 'SEC-6: MultipartPart values are interpolated raw into Content-Disposition / Content-Type')
     def "SEC-6 a CR or LF in multipart #field is rejected"() {
         when:
         MultipartPart.bytes(name, filename, contentType, 'x'.getBytes('UTF-8'))
@@ -253,7 +327,6 @@ class SecurityReviewSpec extends Specification {
     // SEC-7 (MEDIUM) -- cookie value injection
     // ------------------------------------------------------------------------------------------
 
-    @PendingFeature(reason = 'SEC-7: cookie(name, value) concatenates raw, so ; smuggles extra cookies')
     def "SEC-7 a cookie value containing ; is rejected"() {
         given:
         route('/c') { ex -> reply(ex, 200, 'ok') }
@@ -273,7 +346,6 @@ class SecurityReviewSpec extends Specification {
     // SEC-8 (MEDIUM) -- HALF_OPEN admits every caller, not a single probe
     // ------------------------------------------------------------------------------------------
 
-    @PendingFeature(reason = 'SEC-8: tryAcquirePermission returns true for every caller while HALF_OPEN')
     def "SEC-8 HALF_OPEN admits exactly one probe"() {
         given:
         def cb = new GroovyHttpClient.CircuitBreaker(1, 50)
@@ -289,7 +361,6 @@ class SecurityReviewSpec extends Specification {
     // SEC-9 (LOW, resource hygiene) -- close() leaves the JDK HttpClient running
     // ------------------------------------------------------------------------------------------
 
-    @PendingFeature(reason = 'SEC-9: close() shuts the executor but never closes the java.net.http.HttpClient')
     def "SEC-9 close() terminates the underlying HttpClient"() {
         given:
         route('/ok') { ex -> reply(ex, 200, 'ok') }
@@ -301,6 +372,101 @@ class SecurityReviewSpec extends Specification {
 
         then:
         (client.@httpClient as java.net.http.HttpClient).isTerminated()
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // SEC-10 (MEDIUM) -- non-idempotent requests are not retried unless the policy opts in
+    // ------------------------------------------------------------------------------------------
+
+    @Unroll
+    def "SEC-10 a POST that gets a 503 is retried only with retryNonIdempotent (#optIn)"() {
+        given:
+        def calls = new AtomicInteger()
+        route('/order') { ex -> calls.incrementAndGet() == 1 ? reply(ex, 503, 'busy') : reply(ex, 201, 'created') }
+        def policy = new GroovyHttpClient.RetryPolicy.Config().tap {
+            maxAttempts(3)
+            backoffExponential(10, 20, false)
+            on5xx(true)
+            retryNonIdempotent(optIn)
+        }.build()
+        def client = GroovyHttpClient.builder(base).retryPolicy(policy).build()
+
+        when:
+        def outcome = outcomeOf { client.postSync('/order', '{"sku":1}') }
+
+        then:
+        hits['/order'].get() == expectedHits
+        optIn ? (outcome.statusCode == 201) : (outcome instanceof ExecutionException && outcome.cause.statusCode == 503)
+
+        cleanup:
+        client?.close()
+
+        where:
+        optIn | expectedHits
+        false | 1
+        true  | 2
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // SEC-11 (LOW) -- response bodies stay out of exception messages
+    // ------------------------------------------------------------------------------------------
+
+    def "SEC-11 HttpResponseException keeps the body as a field, not in the message"() {
+        given:
+        def body = ('x' * 500) + 'SECRET-TOKEN-abc'
+        route('/err') { ex -> reply(ex, 500, body) }
+        def client = GroovyHttpClient.builder(base).build()
+
+        when:
+        client.get('/err').get(5, TimeUnit.SECONDS)
+
+        then:
+        def e = thrown(ExecutionException)
+        def hre = e.cause as GroovyHttpClient.HttpResponseException
+        hre.statusCode == 500
+        hre.responseBody == body
+        !hre.message.contains('SECRET-TOKEN')
+        hre.message.length() < 250
+
+        cleanup:
+        client?.close()
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // C-1 -- per-request DSL settings reach the wire
+    // ------------------------------------------------------------------------------------------
+
+    def "C-1 a per-request timeout overrides the configured request timeout"() {
+        given:
+        route('/slow') { ex -> Thread.sleep(3000); reply(ex, 200, 'late') }
+        def client = GroovyHttpClient.builder(base).requestTimeout(java.time.Duration.ofSeconds(30)).build()
+
+        when:
+        long t0 = System.nanoTime()
+        client.get('/slow') { timeout(java.time.Duration.ofMillis(300)) }.get(10, TimeUnit.SECONDS)
+
+        then:
+        def e = thrown(ExecutionException)
+        e.cause instanceof java.net.http.HttpTimeoutException
+        (System.nanoTime() - t0) < 2_500_000_000L
+
+        cleanup:
+        client?.close()
+    }
+
+    def "C-1 an unknown DSL call fails loudly instead of being silently dropped"() {
+        given:
+        route('/ok') { ex -> reply(ex, 200, 'ok') }
+        def client = GroovyHttpClient.builder(base).build()
+
+        when:
+        client.get('/ok') { noSuchSetting(true) }
+
+        then:
+        thrown(MissingMethodException)
+
+        cleanup:
+        client?.close()
     }
 
     // ------------------------------------------------------------------------------------------
