@@ -82,13 +82,13 @@
     [id: 'compression.zip-bomb-guard', title: 'maxResponseBytes counts decompressed bytes',           status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
     [id: 'compression.gzip-request', title: 'Optional gzip request bodies',                           status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
 
-    // ==== 2.2 (ideation #178) =================================================================================
-    [id: 'auth.basic',           title: 'Basic auth interceptor',                                     status: 'planned', version: '2.2', integration: true,  protocols: ALL],
-    [id: 'auth.bearer',          title: 'Bearer token interceptor',                                   status: 'planned', version: '2.2', integration: true,  protocols: ALL],
-    [id: 'auth.api-key',         title: 'API key (header or query) interceptor',                      status: 'planned', version: '2.2', integration: false],
-    [id: 'auth.oauth2-client-credentials', title: 'OAuth2 client credentials: cached token, single-flight refresh on 401', status: 'planned', version: '2.2', integration: true, protocols: ALL],
-    [id: 'proxy.http',           title: 'HTTP proxy (CONNECT) configuration',                         status: 'planned', version: '2.2', integration: true,  protocols: ['HTTP_1_1', 'HTTP_2']],
-    [id: 'proxy.socks',          title: 'SOCKS proxy configuration',                                  status: 'planned', version: '2.2', integration: false],
-    [id: 'proxy.auth',           title: 'Proxy authentication; allowedHosts still checked on the target', status: 'planned', version: '2.2', integration: true, protocols: ['HTTP_1_1', 'HTTP_2']],
-    [id: 'testing.published-fixtures', title: 'Mock server / DSL / trait published as test fixtures', status: 'planned', version: '2.2', integration: false],
+    // ==== folded into 2.1 (ideation #178, Addendum B) ========================================================
+    [id: 'auth.basic',           title: 'Basic auth (auth { basic u, p }), base-origin scope, authHosts', status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
+    [id: 'auth.bearer',          title: 'Bearer token, static or supplier per attempt',               status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
+    [id: 'auth.api-key',         title: 'API key (header or query), header stripped cross-origin',    status: 'implemented', version: '2.1', integration: false],
+    [id: 'auth.oauth2-client-credentials', title: 'OAuth2 client credentials: cached token, single-flight refresh on 401', status: 'planned', version: '2.1', integration: true, protocols: ALL],
+    [id: 'proxy.http',           title: 'HTTP proxy (CONNECT) configuration',                         status: 'planned', version: '2.1', integration: true,  protocols: ['HTTP_1_1', 'HTTP_2']],
+    [id: 'proxy.socks',          title: 'SOCKS proxy refused (JDK HttpClient would silently go direct)', status: 'planned', version: '2.1', integration: false],
+    [id: 'proxy.auth',           title: 'Proxy authentication; allowedHosts still checked on the target', status: 'planned', version: '2.1', integration: true, protocols: ['HTTP_1_1', 'HTTP_2']],
+    [id: 'testing.published-fixtures', title: 'Mock server / DSL / trait published as test fixtures', status: 'planned', version: '2.1', integration: false],
 ]

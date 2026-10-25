@@ -9,6 +9,9 @@ import groovy.xml.XmlSlurper
 import org.softwood.http.codec.BuiltinCodecs
 import org.softwood.http.codec.CodecRegistry
 import org.softwood.http.codec.MediaType
+import org.softwood.http.auth.AuthPolicy
+import org.softwood.http.auth.Credential
+import org.softwood.http.auth.TokenTransport
 import org.softwood.http.compression.ContentDecoder
 import org.softwood.http.compression.DecodedResponse
 import org.softwood.http.compression.GzipRequestBody
@@ -219,6 +222,28 @@ class GroovyHttpClient implements AutoCloseable {
     /** Client-level response { } handlers; each request's own block is merged over them (2.1). */
     private volatile ResponseHandlers defaultResponseHandlers
 
+    private volatile AuthPolicy defaultAuth
+
+    /**
+     * Credentials for every request (2.1): auth { basic user, password } | { bearer token } | { bearer { -> supplier() } }
+     * | { apiKey(header: 'X-API-Key', value: key) } | { apiKey(query: 'api_key', value: key) } | { oauth2 { ... } },
+     * optionally with authHosts('other.host'). Sent only to the base URL's origin and those hosts. Null clears.
+     */
+    GroovyHttpClient auth(@DelegatesTo(value = AuthPolicy.Dsl, strategy = Closure.DELEGATE_FIRST) Closure dsl) {
+        defaultAuth = dsl == null ? null : AuthPolicy.from(dsl)
+        this
+    }
+
+    /** The token endpoint transport for OAuth2: this client's HttpClient, no allowedHosts / retry / interceptors. */
+    private final TokenTransport tokenTransport = { URI uri, Map<String, String> headers, String form ->
+        HttpRequest.Builder b = HttpRequest.newBuilder(uri).timeout(config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT)
+                .header('Content-Type', 'application/x-www-form-urlencoded')
+                .header('Accept', 'application/json')
+        headers?.each { String k, String v -> b.header(k, v) }
+        HttpRequest req = b.POST(HttpRequest.BodyPublishers.ofString(form ?: '')).build()
+        httpClient.sendAsync(req, boundedBodyHandler(req))
+    } as TokenTransport
+
     /** Default response { } handlers for every request; a request's own handlers win per key. Null clears them. */
     GroovyHttpClient defaultResponse(@DelegatesTo(value = ResponseHandlers, strategy = Closure.DELEGATE_FIRST) Closure handlers) {
         defaultResponseHandlers = handlers == null ? null : ResponseHandlers.from(handlers)
@@ -262,6 +287,7 @@ class GroovyHttpClient implements AutoCloseable {
         private Boolean compression
         private Long maxStreamItemBytes
         private Closure defaultResponse
+        private Closure authDsl
 
         Builder(String baseUrl) { this.baseUrl = baseUrl }
 
@@ -291,6 +317,9 @@ class GroovyHttpClient implements AutoCloseable {
 
         /** Largest single line / SSE event / NDJSON value a stream consumer may receive (default 1 MiB). */
         Builder maxStreamItemBytes(long bytes) { this.maxStreamItemBytes = bytes; this }
+
+        /** Credentials for every request: see GroovyHttpClient.auth(Closure). */
+        Builder auth(@DelegatesTo(value = AuthPolicy.Dsl, strategy = Closure.DELEGATE_FIRST) Closure dsl) { this.authDsl = dsl; this }
 
         /** Client-level response { } handlers (success / failure / when / exception); requests merge over them. */
         Builder response(@DelegatesTo(value = ResponseHandlers, strategy = Closure.DELEGATE_FIRST) Closure handlers) {
@@ -360,6 +389,7 @@ class GroovyHttpClient implements AutoCloseable {
             ])
             def client = new GroovyHttpClient(cfg, codecRegistry ?: codecBuilder?.build())
             if (defaultResponse != null) client.defaultResponse(defaultResponse)
+            if (authDsl != null) client.auth(authDsl)
             client
         }
     }
@@ -559,6 +589,8 @@ class GroovyHttpClient implements AutoCloseable {
         private Closure streamConsumer = null
         private Duration idleTimeoutOverride = null
         private boolean oneShotBody = false
+        private AuthPolicy authOverride = null
+        private boolean noAuthRequested = false
 
         GroovyRequestBuilder(HttpRequest.Builder builder) { this.builder = builder }
 
@@ -691,6 +723,19 @@ class GroovyHttpClient implements AutoCloseable {
         LineStreamTarget.Kind getStreamKindOrNull() { streamKind }
         Closure getStreamConsumerOrNull() { streamConsumer }
         Duration getIdleTimeoutOrNull() { idleTimeoutOverride }
+
+        /** Credentials for this request only, replacing the client's (2.1). Same DSL as GroovyHttpClient.auth. */
+        GroovyRequestBuilder auth(@DelegatesTo(value = AuthPolicy.Dsl, strategy = Closure.DELEGATE_FIRST) Closure dsl) {
+            authOverride = AuthPolicy.from(dsl)
+            noAuthRequested = false
+            this
+        }
+
+        /** Send this request without the client's credentials (2.1). */
+        GroovyRequestBuilder noAuth() { noAuthRequested = true; authOverride = null; this }
+
+        AuthPolicy getAuthOrNull() { authOverride }
+        boolean isNoAuthRequested() { noAuthRequested }
 
         /** Replace any value of this header set so far (default headers included). */
         void setHeader(String name, String value) {
@@ -1381,6 +1426,7 @@ class GroovyHttpClient implements AutoCloseable {
         ctx.streamTarget = streamTargetFor(wrapped)
         ctx.idleTimeoutMs = wrapped.getIdleTimeoutOrNull()?.toMillis() ?: 0L
         ctx.oneShotBody = wrapped.isOneShotBody()
+        ctx.auth = authFor(wrapped)
 
         def chain = buildInterceptorChain()
 
@@ -1438,25 +1484,20 @@ class GroovyHttpClient implements AutoCloseable {
     }
 
     private Closure<CompletableFuture<HttpClientResponse>> buildInterceptorChain() {
+        // Credentials are applied here, per attempt, so retries see a fresh credential and redirects strip it
+        // cross-origin. A refreshable credential (OAuth2) answered by 401 is refreshed and the request re-sent once.
         Closure<CompletableFuture<HttpClientResponse>> terminal = { RequestContext ctx ->
-            HttpRequest req = ctx.requestSupplier.call()
-            long started = System.nanoTime()
-            sendFollowingRedirects(req, 0, ctx)
-                    .thenApply { HttpResponse<byte[]> resp ->
-                        if (config.enableLogging) {
-                            log.info("[GroovyHttpClient] {} {} -> {} in {} ms (attempt {}, {})", ctx.method, loggableUri(resp.uri()),
-                                    resp.statusCode(), (System.nanoTime() - started).intdiv(1_000_000L), ctx.attempt, resp.version())
-                        }
-                        // byte-accurate maxResponseBytes
-                        long limit = ctx.maxResponseBytes ?: maxResponseBytes
-                        if (limit != Long.MAX_VALUE && resp.body() != null && resp.body().length > limit) {
-                            throw new ResponseTooLargeException(limit, resp.body().length, ctx.method, ctx.uri)
-                        }
-
-                        // >= 400 is raised AFTER retry (raiseForStatus), so status-based retry can see the
-                        // response (SEC-4). Interceptors now receive 4xx/5xx responses rather than exceptions.
-                        new HttpClientResponse(resp, codecs)
+            AuthPolicy auth = ctx.auth
+            if (auth == null || !auth.appliesTo(ctx.uri, host)) return sendAttempt(ctx, null)
+            auth.auth.credential(tokenTransport).thenCompose { Credential cred ->
+                sendAttempt(ctx, cred).thenCompose { HttpClientResponse r ->
+                    if (r.statusCode == 401 && cred.refreshable && canResend(ctx)) {
+                        auth.auth.invalidate(cred)
+                        return auth.auth.credential(tokenTransport).thenCompose { Credential fresh -> sendAttempt(ctx, fresh) }
                     }
+                    CompletableFuture.completedFuture(r)
+                }
+            } as CompletableFuture<HttpClientResponse>
         }
 
         // fold interceptors from last to first
@@ -1480,6 +1521,33 @@ class GroovyHttpClient implements AutoCloseable {
         chain
     }
 
+    private static boolean canResend(RequestContext ctx) {
+        !ctx.oneShotBody && (ctx.streamTarget == null || ctx.streamTarget.retryable)
+    }
+
+    /** One send (redirects followed) of the request as built for this attempt, with the credential applied. */
+    private CompletableFuture<HttpClientResponse> sendAttempt(RequestContext ctx, Credential cred) {
+            HttpRequest req = ctx.requestSupplier.call()
+            if (cred != null) req = cred.applyTo(req)
+            long started = System.nanoTime()
+            sendFollowingRedirects(req, 0, ctx)
+                    .thenApply { HttpResponse<byte[]> resp ->
+                        if (config.enableLogging) {
+                            log.info("[GroovyHttpClient] {} {} -> {} in {} ms (attempt {}, {})", ctx.method, loggableUri(resp.uri()),
+                                    resp.statusCode(), (System.nanoTime() - started).intdiv(1_000_000L), ctx.attempt, resp.version())
+                        }
+                        // byte-accurate maxResponseBytes
+                        long limit = ctx.maxResponseBytes ?: maxResponseBytes
+                        if (limit != Long.MAX_VALUE && resp.body() != null && resp.body().length > limit) {
+                            throw new ResponseTooLargeException(limit, resp.body().length, ctx.method, ctx.uri)
+                        }
+
+                        // >= 400 is raised AFTER retry (raiseForStatus), so status-based retry can see the
+                        // response (SEC-4). Interceptors now receive 4xx/5xx responses rather than exceptions.
+                        new HttpClientResponse(resp, codecs)
+                    } as CompletableFuture<HttpClientResponse>
+    }
+
     /**
      * Response compression for one request (2.1): on when the request says so, else when the client does. Advertises
      * exactly what the client decodes. A caller who set Accept-Encoding gets the body as sent, undecoded.
@@ -1496,6 +1564,12 @@ class GroovyHttpClient implements AutoCloseable {
         if (pub == null || !w.isGzipBodyRequested()) return pub
         w.setHeader('Content-Encoding', 'gzip')
         GzipRequestBody.wrap(pub)
+    }
+
+    /** The request's credentials: its own auth { }, none after noAuth(), else the client's. */
+    private AuthPolicy authFor(GroovyRequestBuilder w) {
+        if (w.isNoAuthRequested()) return null
+        w.getAuthOrNull() ?: defaultAuth
     }
 
     /** The request's stream target: a download target, or a line / SSE / NDJSON consumer bounded by maxStreamItemBytes. */
@@ -1664,7 +1738,7 @@ class GroovyHttpClient implements AutoCloseable {
             if (config.enableLogging) {
                 log.info("[GroovyHttpClient] following {} redirect {} -> {}", resp.statusCode(), loggableUri(req.uri()), loggableUri(target))
             }
-            return sendFollowingRedirects(redirectRequest(req, target, resp.statusCode()), hop + 1, ctx)
+            return sendFollowingRedirects(redirectRequest(req, target, resp.statusCode(), ctx?.auth?.auth?.credentialHeader), hop + 1, ctx)
         } as CompletableFuture<HttpResponse<byte[]>>
     }
 
@@ -1693,13 +1767,14 @@ class GroovyHttpClient implements AutoCloseable {
     }
 
     /** 303 (and 301/302 after POST) become GET without a body, as browsers and the JDK do; 307/308 keep method and body. */
-    private static HttpRequest redirectRequest(HttpRequest prev, URI target, int status) {
+    private static HttpRequest redirectRequest(HttpRequest prev, URI target, int status, String extraCredentialHeader = null) {
+        String extra = extraCredentialHeader?.toLowerCase(Locale.ROOT)
         String method = prev.method()
         boolean toGet = (status == 303 && method != 'HEAD') || ((status == 301 || status == 302) && method == 'POST')
         boolean crossOrigin = !sameOrigin(prev.uri(), target)
         HttpRequest.Builder b = HttpRequest.newBuilder(prev, { String name, String value ->
             String n = name.toLowerCase(Locale.ROOT)
-            if (crossOrigin && CREDENTIAL_HEADERS.contains(n)) return false
+            if (crossOrigin && (CREDENTIAL_HEADERS.contains(n) || n == extra)) return false
             if (toGet && (n == 'content-type' || n == 'content-length')) return false
             return true
         } as java.util.function.BiPredicate<String, String>).uri(target)
@@ -2063,6 +2138,7 @@ class GroovyHttpClient implements AutoCloseable {
         def effectiveRetry = wrapped.getRetryPolicyOrNull() ?: config.retryPolicy ?: RetryPolicy.none()
         def ctx = new RequestContext("POST", uri, reqSupplier, effectiveRetry)
         ctx.decodeResponse = decodeResponse
+        ctx.auth = authFor(wrapped)
         ctx.maxResponseBytes = wrapped.getMaxResponseBytesOrNull() ?: maxResponseBytes
         ctx.streamTarget = streamTargetFor(wrapped)
         ctx.idleTimeoutMs = wrapped.getIdleTimeoutOrNull()?.toMillis() ?: 0L
@@ -2214,6 +2290,8 @@ class GroovyHttpClient implements AutoCloseable {
         long idleTimeoutMs = 0L
         /** The body is an InputStream / Publisher that can be sent once only: no retry, no 307/308 (2.1). */
         boolean oneShotBody = false
+        /** Credentials for this request, or null (2.1). */
+        AuthPolicy auth = null
 
         // Optional helper if user writes interceptor { ctx -> ctx.proceed() }
         Closure<CompletableFuture<HttpClientResponse>> proceed
