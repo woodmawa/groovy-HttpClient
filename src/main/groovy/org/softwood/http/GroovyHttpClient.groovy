@@ -704,6 +704,7 @@ class GroovyHttpClient implements AutoCloseable {
 
     GroovyHttpClient addCookie(String name, String value, String path = "/") {
         def cookie = new HttpCookie(name, value)
+        cookie.version = 0   // RFC 6265: java.net.HttpCookie defaults to RFC 2965 ($Version="1"; name="value"; ...)
         cookie.path = path
         cookie.domain = host.host
         cookieManager.cookieStore.add(host, cookie)
@@ -1193,13 +1194,15 @@ class GroovyHttpClient implements AutoCloseable {
 
         def newQuery = existing ? (existing + "&" + extra) : extra
 
-        new URI(
-                uri.scheme,
-                uri.authority,
-                uri.path,
-                newQuery,
-                uri.fragment
-        )
+        // The query is already percent-encoded. The multi-argument URI constructors quote '%' again
+        // ('&' -> %26 -> %2526), so splice the raw query into the raw URI string instead.
+        String raw = uri.toString()
+        int hash = raw.indexOf('#')
+        String fragment = hash >= 0 ? raw.substring(hash) : ''
+        String noFragment = hash >= 0 ? raw.substring(0, hash) : raw
+        int q = noFragment.indexOf('?')
+        String head = q >= 0 ? noFragment.substring(0, q) : noFragment
+        URI.create(head + '?' + newQuery + fragment)
     }
 
     private static String encodeForm(Map<String, ?> params, Charset charset) {
