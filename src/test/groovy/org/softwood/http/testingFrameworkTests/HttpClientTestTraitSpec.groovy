@@ -1,5 +1,7 @@
 package org.softwood.http.testingFrameworkTests
 
+import org.softwood.http.features.Feature
+
 import org.softwood.http.GroovyHttpClient
 import org.softwood.http.HttpClientTestTrait
 import org.softwood.http.SecurityConfig
@@ -8,6 +10,7 @@ import spock.lang.Specification
 /**
  * Example showing how to use HttpClientTestTrait for even more concise tests
  */
+@Feature('testing.trait')
 class HttpClientTestTraitSpec extends Specification implements HttpClientTestTrait {
 
     def cleanupSpec() {

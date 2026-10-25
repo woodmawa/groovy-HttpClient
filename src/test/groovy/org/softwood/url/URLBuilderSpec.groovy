@@ -1,8 +1,11 @@
 package org.softwood.url
 
+import org.softwood.http.features.Feature
+
 import spock.lang.Specification
 import spock.lang.Unroll
 
+@Feature('url.builder')
 class URLBuilderSpec extends Specification {
 
     def "Default constructor should initialize with https protocol and empty params"() {

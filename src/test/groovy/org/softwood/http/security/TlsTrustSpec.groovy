@@ -1,5 +1,7 @@
 package org.softwood.http.security
 
+import org.softwood.http.features.Feature
+
 import com.sun.net.httpserver.HttpsConfigurator
 import com.sun.net.httpserver.HttpsParameters
 import com.sun.net.httpserver.HttpsServer
@@ -80,6 +82,7 @@ class TlsTrustSpec extends Specification {
         kmf.keyManagers
     }
 
+    @Feature('security.tls-trust')
     def "SEC-1 the default client refuses a certificate it does not trust"() {
         given:
         def client = new GroovyHttpClient(base)
@@ -95,6 +98,7 @@ class TlsTrustSpec extends Specification {
     }
 
     @Unroll
+    @Feature('security.tls-trust')
     def "SEC-13 trusting the test certificate via #route lets the default profile connect"() {
         given:
         def client = new GroovyHttpClient(cfg.call(base, trustedCert) as SecurityConfig)
@@ -112,6 +116,7 @@ class TlsTrustSpec extends Specification {
         'Builder'              | { String b, KeyStore ts -> GroovyHttpClient.builder(b).trustStore(ts).build().config }
     }
 
+    @Feature(['security.profiles', 'security.tls-trust'])
     def "trustAll connects without any trust material (and is the only profile that does)"() {
         given:
         def client = new GroovyHttpClient(SecurityConfig.trustAll(base))
@@ -123,6 +128,7 @@ class TlsTrustSpec extends Specification {
         client?.close()
     }
 
+    @Feature('security.profiles')
     def "testing() verifies certificates unless given an SSLContext"() {
         given:
         def tmf = TrustManagerFactory.getInstance(TrustManagerFactory.defaultAlgorithm)
@@ -146,6 +152,7 @@ class TlsTrustSpec extends Specification {
     }
 
     @Unroll
+    @Feature('security.mtls')
     def "SEC-13 mutual TLS: a server requiring a client certificate #outcome when keyManagers are #state"() {
         given:
         requireClientCert = true
@@ -171,6 +178,7 @@ class TlsTrustSpec extends Specification {
     }
 
     @Unroll
+    @Feature('security.unknown-keys')
     def "SEC-13 an unknown setting name is refused: #key"() {
         when:
         SecurityConfig.production('https://api.example.com').withOverrides([(key): value])
@@ -186,6 +194,7 @@ class TlsTrustSpec extends Specification {
         'enforceHostVerification' | false
     }
 
+    @Feature('security.tls-trust')
     def "SEC-13 conflicting trust settings are refused"() {
         when:
         SecurityConfig.trustAll(base).withOverrides(trustStore: trustedCert)

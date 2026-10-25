@@ -1,5 +1,7 @@
 package org.softwood.http.security
 
+import org.softwood.http.features.Feature
+
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import org.softwood.http.GroovyHttpClient
@@ -82,6 +84,7 @@ class SecurityReviewSpec extends Specification {
     // SEC-1 (CRITICAL) -- the one-arg constructor silently disables TLS verification
     // ------------------------------------------------------------------------------------------
 
+    @Feature('security.tls-trust')
     def "SEC-1 the String constructor must not disable TLS certificate verification"() {
         given: 'the constructor every README / asciidoc quick-start example uses'
         def client = new GroovyHttpClient('https://api.example.com')
@@ -98,6 +101,7 @@ class SecurityReviewSpec extends Specification {
     // ------------------------------------------------------------------------------------------
 
     @Unroll
+    @Feature('security.profiles')
     def "SEC-2 an explicit false for #option is honoured via #route"() {
         expect:
         cfg.call(base)."$option" == false
@@ -109,6 +113,7 @@ class SecurityReviewSpec extends Specification {
         'allowRedirects' | 'withOverrides'  | { String b -> SecurityConfig.production('https://api.example.com').withOverrides([allowRedirects: false]) }
     }
 
+    @Feature('redirect.follow')
     def "SEC-2 allowRedirects(false) returns the 3xx instead of following it"() {
         given:
         route('/start') { ex -> reply(ex, 302, '', [Location: '/target']) }
@@ -130,6 +135,7 @@ class SecurityReviewSpec extends Specification {
     // SEC-3 (HIGH) -- redirects bypass the allowedHosts SSRF guard
     // ------------------------------------------------------------------------------------------
 
+    @Feature('redirect.allowed-hosts')
     def "SEC-3 a redirect to a host outside allowedHosts is not followed"() {
         given:
         route('/start') { ex -> reply(ex, 302, '', [Location: "http://127.0.0.1:${port}/other".toString()]) }
@@ -146,6 +152,7 @@ class SecurityReviewSpec extends Specification {
         client?.close()
     }
 
+    @Feature('redirect.allowed-hosts')
     def "SEC-3 control: the same redirect IS followed when the target host is allowed"() {
         given: 'proves the red case above fails for the policy reason, not because 127.0.0.1 is unreachable'
         route('/start') { ex -> reply(ex, 302, '', [Location: "http://127.0.0.1:${port}/other".toString()]) }
@@ -167,6 +174,7 @@ class SecurityReviewSpec extends Specification {
     // SEC-3 / SEC-12 -- behaviour of the library-managed redirect follower (2.0.0)
     // ------------------------------------------------------------------------------------------
 
+    @Feature('redirect.follow')
     def "SEC-3 a redirect loop stops at maxRedirects"() {
         given:
         route('/loop') { ex -> reply(ex, 302, '', [Location: '/loop']) }
@@ -185,6 +193,7 @@ class SecurityReviewSpec extends Specification {
     }
 
     @Unroll
+    @Feature('redirect.credential-strip')
     def "SEC-12 #header is #outcome on a #kind redirect"() {
         given:
         String seen = null
@@ -214,6 +223,7 @@ class SecurityReviewSpec extends Specification {
     }
 
     @Unroll
+    @Feature('redirect.follow')
     def "SEC-3 a #status after POST is followed as #expectedMethod"() {
         given:
         String method = null
@@ -248,6 +258,7 @@ class SecurityReviewSpec extends Specification {
     // SEC-4 (MEDIUM, resilience correctness) -- status-code retry is dead code
     // ------------------------------------------------------------------------------------------
 
+    @Feature('resilience.retry')
     def "SEC-4 on5xx retry actually retries a 503"() {
         given:
         def calls = new AtomicInteger()
@@ -274,6 +285,7 @@ class SecurityReviewSpec extends Specification {
     // SEC-5 (HIGH, DoS) -- maxResponseBytes is checked only after the whole body is buffered
     // ------------------------------------------------------------------------------------------
 
+    @Feature('response.max-bytes')
     def "SEC-5 a response larger than maxResponseBytes is aborted while streaming"() {
         given: 'a server that streams without end, throttled so the test cannot exhaust memory'
         route('/endless') { ex ->
@@ -309,6 +321,7 @@ class SecurityReviewSpec extends Specification {
     // ------------------------------------------------------------------------------------------
 
     @Unroll
+    @Feature('request.multipart')
     def "SEC-6 a CR or LF in multipart #field is rejected"() {
         when:
         MultipartPart.bytes(name, filename, contentType, 'x'.getBytes('UTF-8'))
@@ -327,6 +340,7 @@ class SecurityReviewSpec extends Specification {
     // SEC-7 (MEDIUM) -- cookie value injection
     // ------------------------------------------------------------------------------------------
 
+    @Feature('request.cookies')
     def "SEC-7 a cookie value containing ; is rejected"() {
         given:
         route('/c') { ex -> reply(ex, 200, 'ok') }
@@ -346,6 +360,7 @@ class SecurityReviewSpec extends Specification {
     // SEC-8 (MEDIUM) -- HALF_OPEN admits every caller, not a single probe
     // ------------------------------------------------------------------------------------------
 
+    @Feature('resilience.circuit-breaker')
     def "SEC-8 HALF_OPEN admits exactly one probe"() {
         given:
         def cb = new GroovyHttpClient.CircuitBreaker(1, 50)
@@ -361,6 +376,7 @@ class SecurityReviewSpec extends Specification {
     // SEC-9 (LOW, resource hygiene) -- close() leaves the JDK HttpClient running
     // ------------------------------------------------------------------------------------------
 
+    @Feature('client.lifecycle')
     def "SEC-9 close() terminates the underlying HttpClient"() {
         given:
         route('/ok') { ex -> reply(ex, 200, 'ok') }
@@ -379,6 +395,7 @@ class SecurityReviewSpec extends Specification {
     // ------------------------------------------------------------------------------------------
 
     @Unroll
+    @Feature('resilience.retry')
     def "SEC-10 a POST that gets a 503 is retried only with retryNonIdempotent (#optIn)"() {
         given:
         def calls = new AtomicInteger()
@@ -411,6 +428,7 @@ class SecurityReviewSpec extends Specification {
     // SEC-11 (LOW) -- response bodies stay out of exception messages
     // ------------------------------------------------------------------------------------------
 
+    @Feature('response.raise-for-status')
     def "SEC-11 HttpResponseException keeps the body as a field, not in the message"() {
         given:
         def body = ('x' * 500) + 'SECRET-TOKEN-abc'
@@ -436,6 +454,7 @@ class SecurityReviewSpec extends Specification {
     // C-1 -- per-request DSL settings reach the wire
     // ------------------------------------------------------------------------------------------
 
+    @Feature('request.timeout')
     def "C-1 a per-request timeout overrides the configured request timeout"() {
         given:
         route('/slow') { ex -> Thread.sleep(3000); reply(ex, 200, 'late') }
@@ -454,6 +473,7 @@ class SecurityReviewSpec extends Specification {
         client?.close()
     }
 
+    @Feature('request.sync')
     def "sync methods throw the underlying failure, not ExecutionException"() {
         given:
         route('/missing') { ex -> reply(ex, 404, 'nope') }
@@ -473,6 +493,7 @@ class SecurityReviewSpec extends Specification {
         client?.close()
     }
 
+    @Feature('request.dsl-validation')
     def "C-1 an unknown DSL call fails loudly instead of being silently dropped"() {
         given:
         route('/ok') { ex -> reply(ex, 200, 'ok') }
@@ -493,6 +514,7 @@ class SecurityReviewSpec extends Specification {
     // ------------------------------------------------------------------------------------------
 
     @Unroll
+    @Feature('observability.logging')
     def "D-9 enableLogging(#enabled) logs the status line without query string or credentials"() {
         given:
         def logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(GroovyHttpClient)
@@ -523,6 +545,7 @@ class SecurityReviewSpec extends Specification {
     // Guards -- pass today, must stay green through the uplift
     // ------------------------------------------------------------------------------------------
 
+    @Feature('response.xml')
     def "SEC-G1 XML responses with a DOCTYPE / external entity are refused (XXE)"() {
         given:
         def xxe = '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/hosts">]><r>&x;</r>'
@@ -539,6 +562,7 @@ class SecurityReviewSpec extends Specification {
         client?.close()
     }
 
+    @Feature('security.allowed-hosts')
     def "SEC-G2 an absolute URL to a host outside allowedHosts is refused"() {
         given:
         def client = GroovyHttpClient.builder(base)
@@ -556,6 +580,7 @@ class SecurityReviewSpec extends Specification {
         client?.close()
     }
 
+    @Feature('security.allowed-hosts')
     def "SEC-G3 absolute URLs are refused by default"() {
         given:
         def client = GroovyHttpClient.builder(base).build()
@@ -570,6 +595,7 @@ class SecurityReviewSpec extends Specification {
         client?.close()
     }
 
+    @Feature(['security.profiles', 'security.tls-trust'])
     def "SEC-G4 the production profile verifies certificates and host names"() {
         given:
         def cfg = SecurityConfig.production('https://api.example.com')

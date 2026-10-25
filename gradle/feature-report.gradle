@@ -1,0 +1,162 @@
+// Feature report + gate for the verification harness (ideation #179).
+//
+//   featureReport  build/reports/features/index.html -- catalogue feature x protocol x JDK, from the last run of
+//                  each test task (build/feature-results/<task>/*.jsonl). Never fails.
+//   featureGate    the same data, failing on any gap: a failed iteration; an implemented feature with no pass on a
+//                  required JDK; an implemented integration feature with no pass on one of its protocols
+//                  (HTTP/3 is required on JDK 26+ only). Gaps are listed in build/reports/features/gaps.txt.
+//   releaseGate    all four test tasks, then featureReport and featureGate.
+
+import groovy.json.JsonSlurper
+import groovy.xml.XmlUtil
+
+abstract class FeatureMatrixTask extends DefaultTask {
+
+    @InputFile abstract RegularFileProperty getCatalogue()
+    @Internal abstract DirectoryProperty getResults()
+    @OutputFile abstract RegularFileProperty getOutput()
+    @Input abstract Property<Boolean> getFailOnGaps()
+    @Input abstract ListProperty<Integer> getRequiredJdks()
+
+    static final List<String> PROTOCOLS = ['HTTP_1_1', 'HTTP_2', 'HTTP_3']
+    static final Map<String, String> LABEL = ['-': 'unit', HTTP_1_1: 'h1', HTTP_2: 'h2', HTTP_3: 'h3']
+
+    @TaskAction
+    void run() {
+        List<Map> catalogue = (List<Map>) new GroovyShell(new Binding([ALL: PROTOCOLS])).evaluate(catalogue.get().asFile)
+        File resultsDir = results.get().asFile
+        List<Map> records = []
+        if (resultsDir.directory) {
+            resultsDir.eachFileRecurse { File f ->
+                if (f.name.endsWith('.jsonl')) f.eachLine('UTF-8') { line -> if (line.trim()) records << (Map) new JsonSlurper().parseText(line) }
+            }
+        }
+
+        // cells[id][jdk][protocol] = [passed:n, failed:n, skipped:n]
+        Map cells = [:].withDefault { [:].withDefault { [:].withDefault { [passed: 0, failed: 0, skipped: 0] } } }
+        records.each { r ->
+            String key = r.outcome == 'PASSED' ? 'passed' : r.outcome == 'FAILED' ? 'failed' : 'skipped'
+            (r.ids as List).each { id -> cells[id][r.jdk as int][r.protocol as String][key]++ }
+        }
+        List<Integer> jdks = ((records*.jdk.collect { it as int } + requiredJdks.get()) as Set).sort().reverse()
+
+        List<String> gaps = []
+        records.findAll { it.outcome == 'FAILED' }.each { gaps << "FAILED  ${it.task} JDK ${it.jdk}: ${it.spec} :: ${it.iteration ?: it.feature} -- ${it.error}" }
+        requiredJdks.get().each { int jdk ->
+            if (!records.any { (it.jdk as int) == jdk }) gaps << "NO RUN  JDK ${jdk}: no test task recorded results"
+        }
+        catalogue.findAll { it.status == 'implemented' }.each { Map e ->
+            requiredJdks.get().findAll { int jdk -> !e.minJdk || jdk >= (e.minJdk as int) }.each { int jdk ->
+                Map byProtocol = cells[e.id][jdk]
+                if (!byProtocol.values().any { it.passed > 0 }) gaps << "UNPROVEN ${e.id} on JDK ${jdk}: no passing spec"
+                if (e.integration) {
+                    (e.protocols as List).findAll { it != 'HTTP_3' || jdk >= 26 }.each { String p ->
+                        if (!(byProtocol[p].passed > 0)) gaps << "UNPROVEN ${e.id} on JDK ${jdk} over ${p}: no passing real-server iteration"
+                    }
+                }
+            }
+        }
+
+        File out = output.get().asFile
+        out.parentFile.mkdirs()
+        if (failOnGaps.get()) {
+            out.text = gaps ? gaps.join('\n') + '\n' : 'no gaps\n'
+            if (gaps) throw new GradleException("featureGate: ${gaps.size()} gap(s):\n  " + gaps.take(40).join('\n  ') + (gaps.size() > 40 ? "\n  ... see ${out}" : ''))
+            logger.lifecycle("featureGate: no gaps across JDK ${requiredJdks.get().join(' and ')}")
+        } else {
+            out.setText(html(catalogue, cells, jdks, records, gaps), 'UTF-8')
+            logger.lifecycle("Feature report: ${out.toURI()}")
+        }
+    }
+
+    // not private: closures in Gradle's decorated subclass cannot reach private methods
+    static String cell(Map c, String protocol, int jdk, boolean required, Integer minJdk) {
+        if (minJdk && jdk < minJdk) return "<td class=\"na\" title=\"needs JDK ${minJdk}+\">n/a</td>"
+        if (protocol == 'HTTP_3' && jdk < 26) return '<td class="na" title="HTTP/3 needs JDK 26+">n/a</td>'
+        if (c.failed > 0) return "<td class=\"fail\" title=\"${c.passed} passed, ${c.failed} failed\">&#10007; ${c.failed}</td>"
+        if (c.passed > 0) return "<td class=\"pass\" title=\"${c.passed} passed${c.skipped ? ", ${c.skipped} skipped" : ''}\">&#10003; ${c.passed}</td>"
+        if (c.skipped > 0) return "<td class=\"skip\" title=\"${c.skipped} skipped\">skip</td>"
+        required ? '<td class="gap" title="required, no passing iteration">&#9888;</td>' : '<td class="empty"></td>'
+    }
+
+    String html(List<Map> catalogue, Map cells, List<Integer> jdks, List<Map> records, List<String> gaps) {
+        def esc = { Object s -> XmlUtil.escapeXml(String.valueOf(s ?: '')) }
+        def columns = ['-'] + PROTOCOLS
+        def sb = new StringBuilder()
+        int implemented = catalogue.count { it.status == 'implemented' }
+        int planned = catalogue.size() - implemented
+        int iterations = records.size()
+        int failed = records.count { it.outcome == 'FAILED' }
+        sb << """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Feature matrix</title><style>
+:root{--bg:#fff;--fg:#1d2329;--muted:#6b7480;--line:#e3e6ea;--pass:#e6f4ea;--passfg:#1e6b34;--fail:#fde8e8;--failfg:#a11b1b;--gap:#fff4e0;--gapfg:#8a5a00;--na:#f4f5f7}
+@media (prefers-color-scheme:dark){:root{--bg:#15181c;--fg:#e6e9ec;--muted:#98a1ab;--line:#2b3138;--pass:#173322;--passfg:#7fd39a;--fail:#3a1717;--failfg:#ff9a9a;--gap:#3a2c10;--gapfg:#f3c46b;--na:#1d2126}}
+body{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;margin:24px 16px}
+h1{font-size:20px;margin:0 0 4px}.sub{color:var(--muted);margin:0 0 16px}
+.wrap{overflow-x:auto}table{border-collapse:collapse;min-width:720px}th,td{border:1px solid var(--line);padding:4px 8px;text-align:center;white-space:nowrap}
+td.f{text-align:left;white-space:normal;max-width:420px}th{font-weight:600;background:var(--na)}
+.pass{background:var(--pass);color:var(--passfg)}.fail{background:var(--fail);color:var(--failfg);font-weight:600}
+.gap{background:var(--gap);color:var(--gapfg)}.na,.skip{background:var(--na);color:var(--muted)}
+tr.planned td{color:var(--muted)}code{font-size:12px}.tag{font-size:11px;color:var(--muted)}
+ul.gaps{color:var(--failfg)}</style></head><body>
+<h1>groovy-HttpClient feature matrix</h1>
+<p class="sub">${implemented} implemented, ${planned} planned &middot; ${iterations} iterations recorded, ${failed} failed &middot; ${gaps.size()} gap(s)</p>
+"""
+        if (gaps) {
+            sb << '<ul class="gaps">'
+            gaps.each { sb << "<li><code>${esc(it)}</code></li>" }
+            sb << '</ul>'
+        }
+        sb << '<div class="wrap"><table><thead><tr><th rowspan="2">Feature</th><th rowspan="2">Status</th>'
+        jdks.each { sb << "<th colspan=\"${columns.size()}\">JDK ${it}</th>" }
+        sb << '</tr><tr>'
+        jdks.each { columns.each { c -> sb << "<th>${LABEL[c]}</th>" } }
+        sb << '</tr></thead><tbody>'
+        catalogue.each { Map e ->
+            boolean impl = e.status == 'implemented'
+            sb << "<tr class=\"${impl ? '' : 'planned'}\"><td class=\"f\"><code>${esc(e.id)}</code><br>${esc(e.title)}</td>"
+            sb << "<td>${impl ? esc(e.version) : 'planned ' + esc(e.version)}</td>"
+            jdks.each { int jdk ->
+                columns.each { String p ->
+                    boolean required = impl && p != '-' && e.integration && (p in (e.protocols as List))
+                    sb << cell(cells[e.id][jdk][p], p, jdk, required, e.minJdk as Integer)
+                }
+            }
+            sb << '</tr>'
+        }
+        sb << '</tbody></table></div>'
+        sb << '<p class="sub">unit = protocol-independent specs (MockHttpServer and friends); h1 / h2 / h3 = real Jetty iterations. ' +
+                'A warning sign marks a protocol the catalogue requires with no passing iteration.</p></body></html>'
+        sb.toString()
+    }
+}
+
+def configureMatrix = { FeatureMatrixTask t ->
+    t.group = 'verification'
+    t.catalogue.set(layout.projectDirectory.file('src/test/resources/feature-catalogue.groovy'))
+    t.results.set(layout.buildDirectory.dir('feature-results'))
+    t.requiredJdks.set(project.featureRequiredJdks as List<Integer>)
+    t.outputs.upToDateWhen { false }
+    t.mustRunAfter 'test', 'testJava25', 'integrationTest', 'integrationTestJava25'
+}
+
+tasks.register('featureReport', FeatureMatrixTask) { t ->
+    configureMatrix(t)
+    t.description = 'Renders the feature x protocol x JDK matrix from the last test runs.'
+    t.failOnGaps.set(false)
+    t.output.set(layout.buildDirectory.file('reports/features/index.html'))
+}
+
+tasks.register('featureGate', FeatureMatrixTask) { t ->
+    configureMatrix(t)
+    t.description = 'Fails if any catalogued feature is not proven on every required JDK and protocol.'
+    t.failOnGaps.set(true)
+    t.output.set(layout.buildDirectory.file('reports/features/gaps.txt'))
+    t.mustRunAfter 'featureReport'
+}
+
+tasks.register('releaseGate') {
+    group = 'verification'
+    description = 'Unit + integration on JDK 27 and 25, then the feature report and gate.'
+    dependsOn 'test', 'testJava25', 'integrationTest', 'integrationTestJava25', 'featureReport', 'featureGate'
+}

@@ -1,5 +1,7 @@
 package org.softwood.http.testingFrameworkTests
 
+import org.softwood.http.features.Feature
+
 import org.softwood.http.GroovyHttpClient
 import org.softwood.http.HttpClientTestDsl
 import org.softwood.http.SecurityConfig
@@ -16,6 +18,7 @@ import spock.lang.AutoCleanup
  * - Test their own code that uses GroovyHttpClient
  * - Verify request expectations
  */
+@Feature(['testing.dsl', 'testing.mock-server'])
 class HttpClientTestDslSpec extends Specification {
 
     @Shared

@@ -89,9 +89,51 @@ tasks.register('testJava25', Test) {
     shouldRunAfter test
 }
 
-tasks.named('check') {
-    dependsOn 'testJava25'
+// ---- Feature verification harness (ideation #179) ------------------------------------------------------
+// feature-catalogue.groovy lists every capability; specs carry @Feature ids; a Spock extension records each
+// iteration (feature ids, protocol, JDK, outcome) under build/feature-results/<task>; featureReport renders the
+// feature x protocol x JDK matrix and featureGate fails on any gap. releaseGate runs the lot.
+sourceSets {
+    integrationTest {
+        compileClasspath += sourceSets.main.output + sourceSets.test.output
+        runtimeClasspath += sourceSets.main.output + sourceSets.test.output
+    }
 }
+
+configurations {
+    integrationTestImplementation.extendsFrom testImplementation
+    integrationTestRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
+tasks.withType(Test).configureEach { Test t ->
+    File resultsDir = layout.buildDirectory.dir("feature-results/${t.name}").get().asFile
+    t.systemProperty 'feature.results.dir', resultsDir.absolutePath
+    t.systemProperty 'feature.results.task', t.name
+    t.outputs.dir(resultsDir).withPropertyName('featureResults')
+    t.doFirst { resultsDir.deleteDir() }
+}
+
+[integrationTest: buildJdk, integrationTestJava25: bytecodeJdk].each { String taskName, int jdk ->
+    tasks.register(taskName, Test) {
+        description = "Runs the real-server feature specs (HTTP/1.1, HTTP/2 and, on JDK 26+, HTTP/3) on JDK ${jdk}."
+        group = 'verification'
+        javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(jdk) }
+        testClassesDirs = sourceSets.integrationTest.output.classesDirs
+        classpath = sourceSets.integrationTest.runtimeClasspath
+        useJUnitPlatform()
+        shouldRunAfter 'test', 'testJava25'
+        // FeatureCoverageSpec scans these for @Feature tags
+        systemProperty 'feature.scan.unitDirs', sourceSets.test.output.classesDirs.files.join(File.pathSeparator)
+        systemProperty 'feature.scan.integrationDirs', sourceSets.integrationTest.output.classesDirs.files.join(File.pathSeparator)
+    }
+}
+
+tasks.named('check') {
+    dependsOn 'testJava25', 'integrationTest', 'integrationTestJava25'
+}
+
+ext.featureRequiredJdks = [buildJdk, bytecodeJdk]
+apply from: 'gradle/feature-report.gradle'
 
 // Javadoc configuration - required for Maven Central
 javadoc {

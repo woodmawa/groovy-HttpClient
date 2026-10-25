@@ -1,5 +1,7 @@
 package org.softwood.http.clientTests
 
+import org.softwood.http.features.Feature
+
 import org.softwood.http.GroovyHttpClient
 import spock.lang.Specification
 import spock.lang.Unroll
@@ -23,6 +25,7 @@ class GroovyHttpClientHttp2Spec extends Specification {
         mockServer?.shutdown()
     }
 
+    @Feature('protocol.http2')
     def "should use HTTP/2-like client for GET requests"() {
         given:
         mockServer.addRequestCheck("GET", "/version", 200)
@@ -42,6 +45,7 @@ class GroovyHttpClientHttp2Spec extends Specification {
     }
 
     @Unroll
+    @Feature('request.verbs')
     def "should handle #method requests correctly"() {
         given:
         mockServer.addRequestCheck(method, "/test", 200)
@@ -66,6 +70,7 @@ class GroovyHttpClientHttp2Spec extends Specification {
         "PATCH"  | _
     }
 
+    @Feature('protocol.http2')
     def "should handle multiplexed concurrent requests"() {
         given:
         def paths = (1..5).collect { "/concurrent$it" }
@@ -89,6 +94,7 @@ class GroovyHttpClientHttp2Spec extends Specification {
         responses.every { it.body.startsWith("Response for /concurrent") }
     }
 
+    @Feature('request.cookies')
     def "should maintain independent cookies across concurrent requests"() {
         given:
         def users = ["alice", "bob", "charlie"]
@@ -127,6 +133,7 @@ class GroovyHttpClientHttp2Spec extends Specification {
         }
     }
 
+    @Feature('request.cookies')
     def "should reject mismatched cookies"() {
         given:
         mockServer.addRequestCheck("GET", "/secure", 200)
@@ -145,6 +152,7 @@ class GroovyHttpClientHttp2Spec extends Specification {
         ex.statusCode == 400
     }
 
+    @Feature('request.cookies')
     def "should clear cookies and enforce rejection after removal"() {
         given:
         mockServer.addRequestCheck("GET", "/cookie-test", 200)

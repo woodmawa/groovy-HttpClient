@@ -1,5 +1,7 @@
 package org.softwood.http.clientTests
 
+import org.softwood.http.features.Feature
+
 import org.softwood.http.GroovyHttpClient
 import org.softwood.http.SecurityConfig
 import spock.lang.Specification
@@ -7,6 +9,7 @@ import spock.lang.Unroll
 
 import java.util.concurrent.CompletableFuture
 
+@Feature('resilience.circuit-breaker')
 class CircuitBreakerSpec extends Specification {
 
     /**
@@ -127,6 +130,7 @@ class CircuitBreakerSpec extends Specification {
 }
 
 // Integration test that uses the actual GroovyHttpClient class
+@Feature('resilience.circuit-breaker')
 class GroovyHttpClientCircuitBreakerIntegrationSpec extends Specification {
     def "circuit breaker should prevent calls when open"() {
         given:

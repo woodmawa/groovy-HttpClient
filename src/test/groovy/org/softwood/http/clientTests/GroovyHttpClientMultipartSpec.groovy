@@ -1,5 +1,7 @@
 package org.softwood.http.clientTests
 
+import org.softwood.http.features.Feature
+
 import groovy.util.logging.Slf4j
 import org.softwood.http.GroovyHttpClient
 import org.softwood.http.MultipartPart
@@ -40,6 +42,7 @@ class GroovyHttpClientMultipartSpec extends Specification {
     // 1. DSL MULTIPART
     // -------------------------------------------------------
 
+    @Feature('request.multipart')
     def "should upload multiple multipart parts using DSL"() {
         given:
         def rc = server.addRequestCheck("POST", "/upload", 200)
@@ -69,6 +72,7 @@ class GroovyHttpClientMultipartSpec extends Specification {
     // 2. API MULTIPART (static list of parts)
     // -------------------------------------------------------
 
+    @Feature('request.multipart')
     def "should upload multipart using postMultipartSync API"() {
         given:
         server.addRequestCheck("POST", "/upload", 200)
@@ -93,6 +97,7 @@ class GroovyHttpClientMultipartSpec extends Specification {
     // 3. DOWNLOAD FILE
     // -------------------------------------------------------
 
+    @Feature('response.download-bytes')
     def "should download file as bytes"() {
         given:
         byte[] payload = "This is a test file".bytes
@@ -112,6 +117,7 @@ class GroovyHttpClientMultipartSpec extends Specification {
     // 4. DOWNLOAD WITH COOKIES
     // -------------------------------------------------------
 
+    @Feature(['response.download-bytes', 'request.cookies'])
     def "should send cookies when downloading a file"() {
         given:
         server.addRequestCheck("GET", "/download", 200)
@@ -131,6 +137,7 @@ class GroovyHttpClientMultipartSpec extends Specification {
     // 5. MULTIPART HEADERS
     // -------------------------------------------------------
 
+    @Feature(['request.multipart', 'request.headers'])
     def "should send headers with multipart request"() {
         given:
         server.addRequestCheck("POST", "/upload", 200)

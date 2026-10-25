@@ -1,5 +1,7 @@
 package org.softwood.http.http3
 
+import org.softwood.http.features.Feature
+
 import org.softwood.http.GroovyHttpClient
 import org.softwood.http.Http3Discovery
 import org.softwood.http.HttpVersion
@@ -45,12 +47,14 @@ class Http3Spec extends Specification {
 
     // ---- configuration (every JDK) -------------------------------------------------------------
 
+    @Feature('protocol.version-config')
     def "isHttp3Available reflects the running JDK"() {
         expect:
         GroovyHttpClient.http3Available == jdkHasHttp3()
     }
 
     @Unroll
+    @Feature('protocol.version-config')
     def "httpVersion accepts #input"() {
         expect:
         SecurityConfig.defaults('https://api.example.com').withOverrides(httpVersion: input).httpVersion == expected
@@ -63,12 +67,14 @@ class Http3Spec extends Specification {
         HttpVersion.HTTP_3 | HttpVersion.HTTP_3
     }
 
+    @Feature('protocol.version-config')
     def "the default is HTTP/2"() {
         expect:
         SecurityConfig.defaults('https://api.example.com').httpVersion == HttpVersion.HTTP_2
         SecurityConfig.production('https://api.example.com').httpVersion == HttpVersion.HTTP_2
     }
 
+    @Feature('protocol.version-config')
     def "a discovery mode implies HTTP/3, including on top of a profile"() {
         when:
         def cfg = SecurityConfig.production('https://api.example.com').withOverrides(http3Discovery: 'ALT_SVC')
@@ -79,6 +85,7 @@ class Http3Spec extends Specification {
     }
 
     @Unroll
+    @Feature('protocol.version-config')
     def "invalid HTTP/3 configuration is refused: #why"() {
         when:
         SecurityConfig.defaults('https://api.example.com').withOverrides(overrides)
@@ -96,6 +103,7 @@ class Http3Spec extends Specification {
     // ---- JDK 25: fallback ------------------------------------------------------------------------
 
     @Requires({ !Http3Spec.jdkHasHttp3() })
+    @Feature('protocol.http3-fallback')
     def "without JDK HTTP/3 a client asking for HTTP/3 falls back to HTTP/2"() {
         given:
         def client = GroovyHttpClient.builder('https://api.example.com').http3(Http3Discovery.ANY).build()
@@ -108,6 +116,7 @@ class Http3Spec extends Specification {
     }
 
     @Requires({ !Http3Spec.jdkHasHttp3() })
+    @Feature('protocol.http3-fallback')
     def "without JDK HTTP/3 an HTTP/3-only client refuses to build"() {
         when:
         GroovyHttpClient.builder('https://api.example.com').http3(Http3Discovery.HTTP_3_URI_ONLY).build()
@@ -120,6 +129,7 @@ class Http3Spec extends Specification {
     // ---- JDK 26+: real HTTP/3 --------------------------------------------------------------------
 
     @Requires({ Http3Spec.jdkHasHttp3() })
+    @Feature('protocol.http3')
     def "the client prefers HTTP/3 when asked"() {
         given:
         def client = GroovyHttpClient.builder('https://api.example.com').http3().build()
@@ -132,6 +142,7 @@ class Http3Spec extends Specification {
     }
 
     @Requires({ Http3Spec.jdkHasHttp3() })
+    @Feature('protocol.http3')
     def "end to end: a GET over HTTP/3 (QUIC) to a local server"() {
         given:
         def client = GroovyHttpClient.builder("https://localhost:${server.port}")
@@ -152,6 +163,7 @@ class Http3Spec extends Specification {
     }
 
     @Requires({ Http3Spec.jdkHasHttp3() })
+    @Feature('protocol.http3')
     def "end to end: one request opts into HTTP/3 on an HTTP/2 client"() {
         given:
         def client = GroovyHttpClient.builder("https://localhost:${server.port}")
@@ -170,6 +182,7 @@ class Http3Spec extends Specification {
     }
 
     @Requires({ Http3Spec.jdkHasHttp3() })
+    @Feature(['protocol.http3', 'security.tls-trust'])
     def "end to end: HTTP/3 still verifies the certificate"() {
         given:
         def client = GroovyHttpClient.builder("https://localhost:${server.port}")
@@ -188,6 +201,7 @@ class Http3Spec extends Specification {
     }
 
     @Requires({ Http3Spec.jdkHasHttp3() })
+    @Feature('protocol.http3-fallback')
     def "HTTP/3-only does not silently fall back when nothing answers over QUIC"() {
         given:
         int port = new DatagramSocket(0).withCloseable { it.localPort }   // a UDP port nobody is listening on

@@ -1,5 +1,7 @@
 package org.softwood.http.clientTests
 
+import org.softwood.http.features.Feature
+
 import org.softwood.http.GroovyHttpClient
 import spock.lang.Specification
 import org.softwood.test.MockHttpServer
@@ -9,6 +11,7 @@ import java.util.concurrent.ExecutionException
 
 class GroovyHttpClientSpec extends Specification {
 
+    @Feature(['request.verbs', 'request.sync'])
     def "should perform basic HTTP requests"() {
         given:
         def mockServer = new MockHttpServer()
@@ -30,6 +33,7 @@ class GroovyHttpClientSpec extends Specification {
         mockServer.shutdown()
     }
 
+    @Feature(['request.verbs', 'request.headers'])
     def "should support PATCH requests with headers"() {
         given:
         def mockServer = new MockHttpServer()
@@ -54,6 +58,7 @@ class GroovyHttpClientSpec extends Specification {
         mockServer.shutdown()
     }
 
+    @Feature('request.headers')
     def "should support default headers + extra headers"() {
         given:
         def mockServer = new MockHttpServer()
@@ -77,6 +82,7 @@ class GroovyHttpClientSpec extends Specification {
         mockServer.shutdown()
     }
 
+    @Feature('response.headers')
     def "should retrieve response headers (single/multiple/case-insensitive)"() {
         given:
         def mockServer = new MockHttpServer()
@@ -103,6 +109,7 @@ class GroovyHttpClientSpec extends Specification {
         mockServer.shutdown()
     }
 
+    @Feature('response.headers')
     def "should handle multi-value headers"() {
         given:
         def mockServer = new MockHttpServer()
@@ -135,6 +142,7 @@ class GroovyHttpClientSpec extends Specification {
         mockServer.shutdown()
     }
 
+    @Feature('request.timeout')
     def "should handle connection timeouts"() {
         given:
         def mockServer = new MockHttpServer()
@@ -156,6 +164,7 @@ class GroovyHttpClientSpec extends Specification {
         mockServer.shutdown()
     }
 
+    @Feature('resilience.circuit-breaker')
     def "circuit breaker opens and resets"() {
         given:
         def mockServer = new MockHttpServer()
@@ -176,6 +185,7 @@ class GroovyHttpClientSpec extends Specification {
         mockServer.shutdown()
     }
 
+    @Feature('request.sync')
     def "executionError"() {
         given:
         def mockServer = new MockHttpServer()
