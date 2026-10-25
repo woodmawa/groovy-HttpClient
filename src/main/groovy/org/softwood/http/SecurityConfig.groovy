@@ -85,6 +85,12 @@ class SecurityConfig {
      * maxResponseBytes then counts decoded bytes. Per request: compression(boolean).
      */
     final boolean compression
+    /**
+     * Largest single line, SSE event or NDJSON value a stream consumer may receive (2.1, default 1 MiB). Bounds memory
+     * for long-lived streams; maxResponseBytes still bounds the whole body (raise it per request for long streams).
+     */
+    final long maxStreamItemBytes
+    static final long DEFAULT_MAX_STREAM_ITEM_BYTES = 1_048_576L
 
     // Protocol
     /** Preferred HTTP version (default HTTP_2). HTTP_3 needs JDK 26+ at runtime; otherwise the client falls back to HTTP_2. */
@@ -116,7 +122,8 @@ class SecurityConfig {
             'cookiePolicy', 'allowedHosts', 'enableLogging', 'enableMetrics', 'allowRedirects', 'maxRedirects',
             'failureThreshold', 'resetTimeoutMs', 'retryPolicy', 'enforceHostnameVerification', 'allowedTlsProtocols',
             'allowedCipherSuites', 'sslContext', 'trustStore', 'trustManagers', 'keyManagers',
-            'httpVersion', 'http3Discovery', 'errorBodyPreviewChars', 'compression'
+            'httpVersion', 'http3Discovery', 'errorBodyPreviewChars', 'compression',
+            'maxStreamItemBytes'
     ] as LinkedHashSet<String>).asImmutable()
 
     /**
@@ -151,6 +158,10 @@ class SecurityConfig {
         this.maxRedirects                = opt(a, 'maxRedirects', DEFAULT_MAX_REDIRECTS) as int
         this.errorBodyPreviewChars       = opt(a, 'errorBodyPreviewChars', 0) as int
         this.compression                 = opt(a, 'compression', false) as boolean
+        this.maxStreamItemBytes          = opt(a, 'maxStreamItemBytes', DEFAULT_MAX_STREAM_ITEM_BYTES) as long
+        if (maxStreamItemBytes <= 0) {
+            throw new IllegalArgumentException("maxStreamItemBytes must be positive (was ${maxStreamItemBytes})")
+        }
         this.http3Discovery              = toEnum(Http3Discovery, opt(a, 'http3Discovery', null))
         this.httpVersion                 = toEnum(HttpVersion, opt(a, 'httpVersion',
                 http3Discovery != null ? HttpVersion.HTTP_3 : HttpVersion.HTTP_2))
@@ -329,6 +340,7 @@ class SecurityConfig {
                 maxRedirects               : maxRedirects,
                 errorBodyPreviewChars      : errorBodyPreviewChars,
                 compression                : compression,
+                maxStreamItemBytes         : maxStreamItemBytes,
                 httpVersion                : httpVersion,
                 http3Discovery             : http3Discovery,
                 failureThreshold           : failureThreshold,

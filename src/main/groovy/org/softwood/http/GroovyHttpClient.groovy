@@ -12,6 +12,8 @@ import org.softwood.http.codec.MediaType
 import org.softwood.http.compression.ContentDecoder
 import org.softwood.http.compression.DecodedResponse
 import org.softwood.http.compression.GzipRequestBody
+import org.softwood.http.streaming.LineStreamTarget
+import org.softwood.http.streaming.StoppedResponse
 import org.softwood.http.streaming.StreamTarget
 
 import javax.net.ssl.SSLContext
@@ -257,6 +259,7 @@ class GroovyHttpClient implements AutoCloseable {
         private CodecRegistry.Builder codecBuilder
         private Integer errorBodyPreviewChars
         private Boolean compression
+        private Long maxStreamItemBytes
         private Closure defaultResponse
 
         Builder(String baseUrl) { this.baseUrl = baseUrl }
@@ -284,6 +287,9 @@ class GroovyHttpClient implements AutoCloseable {
 
         /** Response compression (default off): send Accept-Encoding gzip, deflate and decode those bodies. */
         Builder compression(boolean enabled) { this.compression = enabled; this }
+
+        /** Largest single line / SSE event / NDJSON value a stream consumer may receive (default 1 MiB). */
+        Builder maxStreamItemBytes(long bytes) { this.maxStreamItemBytes = bytes; this }
 
         /** Client-level response { } handlers (success / failure / when / exception); requests merge over them. */
         Builder response(@DelegatesTo(value = ResponseHandlers, strategy = Closure.DELEGATE_FIRST) Closure handlers) {
@@ -348,7 +354,8 @@ class GroovyHttpClient implements AutoCloseable {
                     httpVersion                : httpVersion,
                     http3Discovery             : http3Discovery,
                     errorBodyPreviewChars      : errorBodyPreviewChars,
-                    compression                : compression
+                    compression                : compression,
+                    maxStreamItemBytes         : maxStreamItemBytes
             ])
             def client = new GroovyHttpClient(cfg, codecRegistry ?: codecBuilder?.build())
             if (defaultResponse != null) client.defaultResponse(defaultResponse)
@@ -547,6 +554,9 @@ class GroovyHttpClient implements AutoCloseable {
         private boolean gzipBodyRequested = false
         private Long maxResponseBytesOverride = null
         private StreamTarget streamTarget = null
+        private LineStreamTarget.Kind streamKind = null
+        private Closure streamConsumer = null
+        private Duration idleTimeoutOverride = null
 
         GroovyRequestBuilder(HttpRequest.Builder builder) { this.builder = builder }
 
@@ -635,13 +645,50 @@ class GroovyHttpClient implements AutoCloseable {
 
         /** Internal: where this request's 2xx body is streamed. One target per request. */
         GroovyRequestBuilder streamTo(StreamTarget target) {
-            if (streamTarget != null) throw new IllegalStateException('A request can stream its body to one target only')
+            if (streamTarget != null || streamConsumer != null) throw new IllegalStateException('A request can stream its body to one target only')
             streamTarget = target
             this
         }
 
         Long getMaxResponseBytesOrNull() { maxResponseBytesOverride }
         StreamTarget getStreamTargetOrNull() { streamTarget }
+
+        /**
+         * Deliver the 2xx body line by line as it arrives (2.1): { String line -> } or { String line, StreamControl c -> }.
+         * Lines end at \n, \r\n or \r; the charset comes from Content-Type (UTF-8 default).
+         */
+        GroovyRequestBuilder lines(Closure consumer) { streamConsumer(LineStreamTarget.Kind.LINES, consumer) }
+
+        /** Deliver Server-Sent Events as they arrive: { SseEvent e -> } or { SseEvent e, StreamControl c -> }. No reconnection. */
+        GroovyRequestBuilder sse(Closure consumer) { streamConsumer(LineStreamTarget.Kind.SSE, consumer) }
+
+        /** Deliver each NDJSON line parsed (Map / List / value); blank lines are skipped. */
+        GroovyRequestBuilder ndjson(Closure consumer) { streamConsumer(LineStreamTarget.Kind.NDJSON, consumer) }
+
+        /** Internal: declare a stream consumer. One stream target per request. */
+        GroovyRequestBuilder streamConsumer(LineStreamTarget.Kind kind, Closure consumer) {
+            if (consumer == null) throw new IllegalArgumentException('A stream consumer closure is required')
+            if (streamTarget != null || streamConsumer != null) throw new IllegalStateException('A request can stream its body to one target only')
+            streamKind = kind
+            streamConsumer = consumer
+            this
+        }
+
+        /**
+         * Fail a response that delivers no bytes for this long with HttpTimeoutException (2.1, default off). The request
+         * timeout covers the time to response headers; this covers the body, e.g. a stalled stream.
+         */
+        GroovyRequestBuilder idleTimeout(Duration duration) {
+            if (duration == null || duration.isZero() || duration.isNegative()) {
+                throw new IllegalArgumentException('idleTimeout must be a positive duration')
+            }
+            idleTimeoutOverride = duration
+            this
+        }
+
+        LineStreamTarget.Kind getStreamKindOrNull() { streamKind }
+        Closure getStreamConsumerOrNull() { streamConsumer }
+        Duration getIdleTimeoutOrNull() { idleTimeoutOverride }
 
         /** Replace any value of this header set so far (default headers included). */
         void setHeader(String name, String value) {
@@ -1093,6 +1140,40 @@ class GroovyHttpClient implements AutoCloseable {
         awaitResult(download(path, out, cfg), timeout)
     }
 
+    /* ---- Line / SSE / NDJSON streams (2.1): GET shortcuts; any verb can declare lines {} / sse {} / ndjson {} ---- */
+
+    CompletableFuture<StreamResult> lines(String path, Closure consumer) { consumerGet(path, LineStreamTarget.Kind.LINES, null, consumer) }
+    CompletableFuture<StreamResult> lines(String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg, Closure consumer) {
+        consumerGet(path, LineStreamTarget.Kind.LINES, cfg, consumer)
+    }
+    CompletableFuture<StreamResult> sse(String path, Closure consumer) { consumerGet(path, LineStreamTarget.Kind.SSE, null, consumer) }
+    CompletableFuture<StreamResult> sse(String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg, Closure consumer) {
+        consumerGet(path, LineStreamTarget.Kind.SSE, cfg, consumer)
+    }
+    CompletableFuture<StreamResult> ndjson(String path, Closure consumer) { consumerGet(path, LineStreamTarget.Kind.NDJSON, null, consumer) }
+    CompletableFuture<StreamResult> ndjson(String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg, Closure consumer) {
+        consumerGet(path, LineStreamTarget.Kind.NDJSON, cfg, consumer)
+    }
+
+    /** Stream sync methods wait until the stream ends (or is stopped); requestTimeout / idleTimeout bound the wait. */
+    StreamResult linesSync(String path, Closure consumer) { awaitResult(lines(path, consumer), null) }
+    StreamResult linesSync(String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg, Closure consumer) {
+        awaitResult(lines(path, cfg, consumer), null)
+    }
+    StreamResult sseSync(String path, Closure consumer) { awaitResult(sse(path, consumer), null) }
+    StreamResult sseSync(String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg, Closure consumer) {
+        awaitResult(sse(path, cfg, consumer), null)
+    }
+    StreamResult ndjsonSync(String path, Closure consumer) { awaitResult(ndjson(path, consumer), null) }
+    StreamResult ndjsonSync(String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg, Closure consumer) {
+        awaitResult(ndjson(path, cfg, consumer), null)
+    }
+
+    private CompletableFuture<StreamResult> consumerGet(String path, LineStreamTarget.Kind kind, Closure cfg, Closure consumer) {
+        send("GET", path, null, cfg, { GroovyRequestBuilder b -> b.streamConsumer(kind, consumer) })
+                .thenApply { Object v -> (StreamResult) typedResult(v, StreamResult) } as CompletableFuture<StreamResult>
+    }
+
     HttpClientResponse getSync(String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
         responseOrFail(awaitResult(get(path, cfg), timeout))
     }
@@ -1241,7 +1322,8 @@ class GroovyHttpClient implements AutoCloseable {
         def ctx = new RequestContext(method.toUpperCase(), finalUri, requestSupplier, effectiveRetry)
         ctx.decodeResponse = decodeResponse
         ctx.maxResponseBytes = wrapped.getMaxResponseBytesOrNull() ?: maxResponseBytes
-        ctx.streamTarget = wrapped.getStreamTargetOrNull()
+        ctx.streamTarget = streamTargetFor(wrapped)
+        ctx.idleTimeoutMs = wrapped.getIdleTimeoutOrNull()?.toMillis() ?: 0L
 
         def chain = buildInterceptorChain()
 
@@ -1357,6 +1439,14 @@ class GroovyHttpClient implements AutoCloseable {
         if (pub == null || !w.isGzipBodyRequested()) return pub
         w.setHeader('Content-Encoding', 'gzip')
         GzipRequestBody.wrap(pub)
+    }
+
+    /** The request's stream target: a download target, or a line / SSE / NDJSON consumer bounded by maxStreamItemBytes. */
+    private StreamTarget streamTargetFor(GroovyRequestBuilder w) {
+        StreamTarget t = w.getStreamTargetOrNull()
+        if (t != null) return t
+        Closure c = w.getStreamConsumerOrNull()
+        c == null ? null : new LineStreamTarget(w.getStreamKindOrNull(), c, config.maxStreamItemBytes)
     }
 
     /** Commit a streamed body once the request succeeded (after retries and status checks); discard it otherwise. */
@@ -1483,10 +1573,15 @@ class GroovyHttpClient implements AutoCloseable {
         def failure = new java.util.concurrent.atomic.AtomicReference<RuntimeException>()
         def decodedAs = ctx?.decodeResponse ? new java.util.concurrent.atomic.AtomicReference<String>() : null
         long limit = ctx?.maxResponseBytes ?: maxResponseBytes
-        httpClient.sendAsync(req, boundedBodyHandler(req, failure, decodedAs, limit, ctx?.streamTarget)).handle { HttpResponse<byte[]> r, Throwable err ->
-            if (err == null) {
+        // A consumer's stop() cancels the body; HTTP/2 and HTTP/3 then fail the exchange, so the head travels here.
+        def stoppedAt = new java.util.concurrent.atomic.AtomicReference<HttpResponse.ResponseInfo>()
+        httpClient.sendAsync(req, boundedBodyHandler(req, failure, decodedAs, limit, ctx?.streamTarget, ctx?.idleTimeoutMs ?: 0L, stoppedAt))
+                .handle { HttpResponse<byte[]> r, Throwable err ->
+            HttpResponse.ResponseInfo stopped = stoppedAt.get()
+            if (err == null || stopped != null) {
+                HttpResponse<byte[]> resp = (err == null) ? r : (HttpResponse<byte[]>) new StoppedResponse(req, stopped)
                 String enc = decodedAs?.get()
-                return enc != null ? (HttpResponse<byte[]>) new DecodedResponse(r, enc) : r
+                return enc != null ? (HttpResponse<byte[]>) new DecodedResponse(resp, enc) : resp
             }
             RuntimeException own = failure.get()
             if (own != null) throw own
@@ -1558,7 +1653,9 @@ class GroovyHttpClient implements AutoCloseable {
             java.util.concurrent.atomic.AtomicReference<RuntimeException> sink = null,
             java.util.concurrent.atomic.AtomicReference<String> decodedAs = null,
             long max = maxResponseBytes,
-            StreamTarget target = null) {
+            StreamTarget target = null,
+            long idleMs = 0L,
+            java.util.concurrent.atomic.AtomicReference<HttpResponse.ResponseInfo> stoppedAt = null) {
         String method = req?.method()
         URI uri = req?.uri()
         return { HttpResponse.ResponseInfo info ->
@@ -1570,8 +1667,9 @@ class GroovyHttpClient implements AutoCloseable {
             }
             // Only a final 2xx body is streamed; redirect and error bodies are read into memory, bounded.
             int status = info.statusCode()
-            StreamTarget.BodySink out = (target != null && status >= 200 && status < 300) ? target.openAttempt() : null
-            new BoundedBodySubscriber(max, method, uri, sink, decoder, out)
+            StreamTarget.BodySink out = (target != null && status >= 200 && status < 300) ? target.openAttempt(info.headers().firstValue('Content-Type').orElse(null)) : null
+            Runnable onStop = stoppedAt == null ? null : ({ -> stoppedAt.set(info) } as Runnable)
+            new BoundedBodySubscriber(max, method, uri, sink, decoder, out, idleMs, onStop)
         } as HttpResponse.BodyHandler<byte[]>
     }
 
@@ -1593,10 +1691,27 @@ class GroovyHttpClient implements AutoCloseable {
         /** Streamed requests: where kept bytes go instead of the in-memory buffer (2.1). */
         private final StreamTarget.BodySink out
 
+        /** idleTimeout (2.1): fail when no bytes arrive for this long while the consumer is not busy. */
+        private final long idleNanos
+        private volatile long lastActivity = 0L
+        private volatile boolean busy = false
+        /** Records the response head when a consumer stops the stream (HTTP/2 and HTTP/3 report the cancel as a failure). */
+        private final Runnable onStop
+        private java.util.concurrent.ScheduledFuture<?> watchdog
+        private static final java.util.concurrent.ScheduledExecutorService IDLE_TIMER =
+                Executors.newSingleThreadScheduledExecutor({ Runnable r ->
+                    Thread t = new Thread(r, 'groovy-httpclient-idle-timeout')
+                    t.setDaemon(true)
+                    t
+                } as ThreadFactory)
+
         BoundedBodySubscriber(long max, String method = null, URI uri = null,
                               java.util.concurrent.atomic.AtomicReference<RuntimeException> sink = null,
-                              ContentDecoder decoder = null, StreamTarget.BodySink out = null) {
+                              ContentDecoder decoder = null, StreamTarget.BodySink out = null, long idleMs = 0L,
+                              Runnable onStop = null) {
             this.out = out
+            this.onStop = onStop
+            this.idleNanos = idleMs * 1_000_000L
             this.max = max
             this.method = method
             this.uri = uri
@@ -1611,12 +1726,27 @@ class GroovyHttpClient implements AutoCloseable {
         @Override
         void onSubscribe(Flow.Subscription s) {
             this.subscription = s
+            if (idleNanos > 0L) {
+                lastActivity = System.nanoTime()
+                long period = Math.max(10L, idleNanos.intdiv(4_000_000L) as long)
+                watchdog = IDLE_TIMER.scheduleAtFixedRate({ -> checkIdle() } as Runnable, period, period, TimeUnit.MILLISECONDS)
+            }
             s.request(Long.MAX_VALUE)
+        }
+
+        void checkIdle() {
+            if (result.isDone()) { watchdog?.cancel(false); return }
+            if (busy) return   // a slow consumer is not an idle server
+            if (System.nanoTime() - lastActivity > idleNanos) {
+                fail(new CompletionException(new java.net.http.HttpTimeoutException(
+                        'No response bytes for ' + idleNanos.intdiv(1_000_000L) + ' ms (idleTimeout) from ' + method + ' ' + uri?.path)))
+            }
         }
 
         @Override
         void onNext(List<ByteBuffer> items) {
             if (result.isDone()) return
+            busy = true
             try {
                 for (ByteBuffer bb : items) {
                     if (decoder == null) {
@@ -1630,9 +1760,26 @@ class GroovyHttpClient implements AutoCloseable {
                         decoder.decode(bb, decodedSink)
                     }
                 }
+            } catch (StreamTarget.StopStream stop) {
+                stopEarly()
             } catch (RuntimeException e) {
                 fail(e)
+            } catch (Exception e) {
+                fail(new CompletionException(e))   // a consumer's checked exception; unwrapped for the caller
+            } finally {
+                lastActivity = System.nanoTime()
+                busy = false
             }
+        }
+
+        /** The consumer stopped the stream: cancel the response and complete normally (2.1). */
+        private void stopEarly() {
+            watchdog?.cancel(false)
+            onStop?.run()
+            decoder?.close()
+            try { out?.complete() } catch (RuntimeException ignored) { }
+            result.complete(new byte[0])
+            subscription?.cancel()
         }
 
         /** Count and keep body bytes; over the limit this throws before buffering them. */
@@ -1644,6 +1791,8 @@ class GroovyHttpClient implements AutoCloseable {
         }
 
         private void fail(RuntimeException e) {
+            if (result.isDone()) return
+            watchdog?.cancel(false)
             if (sink != null) sink.set(e)
             result.completeExceptionally(e)
             decoder?.close()
@@ -1653,6 +1802,7 @@ class GroovyHttpClient implements AutoCloseable {
 
         @Override
         void onError(Throwable t) {
+            watchdog?.cancel(false)
             decoder?.close()
             out?.abort()
             result.completeExceptionally(t)
@@ -1660,30 +1810,22 @@ class GroovyHttpClient implements AutoCloseable {
 
         @Override
         void onComplete() {
+            watchdog?.cancel(false)
             if (result.isDone()) return
-            if (decoder != null) {
-                try {
-                    decoder.finish(decodedSink)
-                } catch (RuntimeException e) {
-                    out?.abort()
-                    if (sink != null) sink.set(e)
-                    result.completeExceptionally(e)
-                    return
-                }
-            }
-            if (out != null) {
-                try {
-                    out.complete()
-                } catch (RuntimeException e) {
-                    out.abort()
-                    if (sink != null) sink.set(e)
-                    result.completeExceptionally(e)
-                    return
-                }
+            try {
+                if (decoder != null) decoder.finish(decodedSink)
+                if (out != null) out.complete()
+            } catch (StreamTarget.StopStream stop) {
                 result.complete(new byte[0])
                 return
+            } catch (Exception e) {
+                RuntimeException re = e instanceof RuntimeException ? (RuntimeException) e : new CompletionException(e)
+                out?.abort()
+                if (sink != null) sink.set(re)
+                result.completeExceptionally(re)
+                return
             }
-            result.complete(buffer.toByteArray())
+            result.complete(out != null ? new byte[0] : buffer.toByteArray())
         }
     }
 
@@ -1860,7 +2002,8 @@ class GroovyHttpClient implements AutoCloseable {
         def ctx = new RequestContext("POST", uri, reqSupplier, effectiveRetry)
         ctx.decodeResponse = decodeResponse
         ctx.maxResponseBytes = wrapped.getMaxResponseBytesOrNull() ?: maxResponseBytes
-        ctx.streamTarget = wrapped.getStreamTargetOrNull()
+        ctx.streamTarget = streamTargetFor(wrapped)
+        ctx.idleTimeoutMs = wrapped.getIdleTimeoutOrNull()?.toMillis() ?: 0L
 
         def chain = buildInterceptorChain()
 
@@ -2005,6 +2148,8 @@ class GroovyHttpClient implements AutoCloseable {
         Long maxResponseBytes = null
         /** Streamed requests: where a 2xx body goes (2.1). */
         StreamTarget streamTarget = null
+        /** Per-request idleTimeout in ms (2.1); 0 = off. */
+        long idleTimeoutMs = 0L
 
         // Optional helper if user writes interceptor { ctx -> ctx.proceed() }
         Closure<CompletableFuture<HttpClientResponse>> proceed

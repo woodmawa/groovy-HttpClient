@@ -222,6 +222,10 @@ class FeatureServer {
                 case '/ndjson':
                     return send(request, response, callback, 200, 'application/x-ndjson',
                             '{"n":1}\n{"n":2}\n{"n":3}\n')
+                case '/drip':
+                    return drip(response, callback, (q.n?.first() ?: '5') as int, (q.gapMs?.first() ?: '100') as long)
+                case '/sink':
+                    return sink(request, response, callback)
                 case '/lines':
                     return send(request, response, callback, 200, 'text/plain; charset=UTF-8', 'alpha\nbeta\ngamma\n')
                 case '/auth/basic':
@@ -282,6 +286,44 @@ class FeatureServer {
             response.headers.put('Content-Encoding', kind)
             response.headers.put('Vary', 'Accept-Encoding')
             send(request, response, callback, 200, 'text/plain; charset=UTF-8', bos.toByteArray())
+        }
+
+        /** n lines 'drip i', one every gapMs, each flushed as it is written. A client that stops reading ends it. */
+        private static boolean drip(Response response, Callback callback, int n, long gapMs) {
+            response.status = 200
+            response.headers.put('Content-Type', 'text/plain; charset=UTF-8')
+            try {
+                for (int i = 1; i <= n; i++) {
+                    def done = new org.eclipse.jetty.util.FutureCallback()
+                    response.write(false, ByteBuffer.wrap("drip ${i}\n".toString().getBytes(StandardCharsets.UTF_8)), done)
+                    done.get()
+                    if (i < n) Thread.sleep(gapMs)
+                }
+                response.write(true, null, callback)
+            } catch (Exception e) {
+                callback.failed(e)   // the client went away (stop, idle timeout)
+            }
+            true
+        }
+
+        /** Consumes the request body without keeping it; answers its length and SHA-256 (upload specs). */
+        private static boolean sink(Request request, Response response, Callback callback) {
+            def digest = java.security.MessageDigest.getInstance('SHA-256')
+            long length = 0L
+            InputStream body = Content.Source.asInputStream(request)
+            byte[] buf = new byte[65_536]
+            int n
+            while ((n = body.read(buf)) > 0) {
+                digest.update(buf, 0, n)
+                length += n
+            }
+            Map<String, String> h = [:]
+            for (HttpField f : request.headers) h[f.name.toLowerCase(Locale.ROOT)] = f.value
+            send(request, response, callback, 200, 'application/json', JsonOutput.toJson([
+                    method : request.method,
+                    length : length,
+                    sha256 : digest.digest().encodeHex().toString(),
+                    headers: h]))
         }
 
         private static Map<String, List<String>> queryParams(Request request) {

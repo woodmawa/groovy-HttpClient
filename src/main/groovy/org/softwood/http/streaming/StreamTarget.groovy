@@ -26,23 +26,34 @@ abstract class StreamTarget {
         void abort()
     }
 
+    /**
+     * Thrown from BodySink.write by a consumer that called StreamControl.stop(): the body subscriber cancels the
+     * response and completes normally. No stack trace; one shared instance.
+     */
+    static final class StopStream extends RuntimeException {
+        private StopStream() { super('stream stopped by its consumer', null, false, false) }
+    }
+
+    static final StopStream STOP = new StopStream()
+
     protected long bytes
     protected long items
     protected boolean stopped
     private BodySink current
 
     /** A fresh sink for this attempt; any earlier attempt's sink is aborted first. */
-    synchronized BodySink openAttempt() {
+    synchronized BodySink openAttempt(String contentType = null) {
         current?.abort()
         bytes = 0L
         items = 0L
         stopped = false
-        BodySink inner = newSink()
+        BodySink inner = newSink(contentType)
         current = new CountingSink(this, inner)
         current
     }
 
-    protected abstract BodySink newSink()
+    /** A sink for one attempt; contentType is the response's Content-Type (for its charset), or null. */
+    protected abstract BodySink newSink(String contentType)
 
     /** May the request be retried after the attempt that just ended? */
     abstract boolean isRetryable()
@@ -93,7 +104,7 @@ abstract class StreamTarget {
         Path getPath() { target }
 
         @Override
-        protected BodySink newSink() {
+        protected BodySink newSink(String contentType) {
             Path dir = target.getParent()
             Files.createDirectories(dir)
             Path t = Files.createTempFile(dir, target.getFileName().toString() + '.', '.part')
@@ -149,7 +160,7 @@ abstract class StreamTarget {
         void markWritten() { written = true }
 
         @Override
-        protected BodySink newSink() { new CallerStreamSink(this, out) }
+        protected BodySink newSink(String contentType) { new CallerStreamSink(this, out) }
 
         /** Bytes already handed to the caller's stream cannot be taken back: no retry after the first one. */
         @Override
