@@ -157,6 +157,6 @@ tasks.register('featureGate', FeatureMatrixTask) { t ->
 
 tasks.register('releaseGate') {
     group = 'verification'
-    description = 'Unit + integration on JDK 27 and 25, then the feature report and gate.'
-    dependsOn 'test', 'testJava25', 'integrationTest', 'integrationTestJava25', 'featureReport', 'featureGate'
+    description = 'Unit + integration on JDK 27 and 25, the feature report and gate, and the published-fixtures consumer smoke build.'
+    dependsOn 'test', 'testJava25', 'integrationTest', 'integrationTestJava25', 'featureReport', 'featureGate', 'consumerSmoke'
 }

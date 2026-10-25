@@ -50,6 +50,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * @author Will Woodman / Softwood Consulting Ltd
  * @since 1.4.0
+ * <p><b>Incubating (2.1):</b> published as the {@code test-fixtures} variant of groovy-httpclient; the API may change before 3.0.
  */
 @Slf4j
 class HttpClientTestDsl implements AutoCloseable {

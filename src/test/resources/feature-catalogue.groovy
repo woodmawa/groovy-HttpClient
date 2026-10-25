@@ -90,5 +90,5 @@
     [id: 'proxy.http',           title: 'HTTP proxy (CONNECT) configuration, nonProxyHosts, noProxy',  status: 'implemented', version: '2.1', integration: true,  protocols: ['HTTP_1_1', 'HTTP_2']],
     [id: 'proxy.socks',          title: 'SOCKS proxy refused (JDK HttpClient would silently go direct)', status: 'implemented', version: '2.1', integration: false],
     [id: 'proxy.auth',           title: 'Proxy authentication; allowedHosts still checked on the target', status: 'implemented', version: '2.1', integration: true, protocols: ['HTTP_1_1', 'HTTP_2']],
-    [id: 'testing.published-fixtures', title: 'Mock server / DSL / trait published as test fixtures', status: 'planned', version: '2.1', integration: false],
+    [id: 'testing.published-fixtures', title: 'Mock server / DSL / trait published as test fixtures (incubating); consumer smoke build', status: 'implemented', version: '2.1', integration: false],
 ]

@@ -26,6 +26,7 @@ import spock.lang.Shared
  *     }
  * }
  * }</pre>
+ * <p><b>Incubating (2.1):</b> published as the {@code test-fixtures} variant of groovy-httpclient; the API may change before 3.0.
  */
 trait HttpClientTestTrait {
 

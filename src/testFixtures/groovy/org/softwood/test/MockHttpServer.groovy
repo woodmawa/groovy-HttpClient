@@ -236,6 +236,7 @@ import java.util.concurrent.Executors
  *  - Safe context creation (no duplicate context errors)
  *
  * Tracks its own context registry since JDK HttpServer provides no API for this.
+ * <p><b>Incubating (2.1):</b> published as the {@code test-fixtures} variant of groovy-httpclient; the API may change before 3.0.
  */
 
 @Slf4j

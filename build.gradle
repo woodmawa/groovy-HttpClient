@@ -1,6 +1,7 @@
 plugins {
     id 'groovy'
     id 'java-library'   // api vs implementation -> correct compile/runtime scopes in the published POM
+    id 'java-test-fixtures'   // 2.1: MockHttpServer, HttpClientTestDsl, HttpClientTestTrait published as the test-fixtures variant
     id 'maven-publish'
     id 'signing'
     alias(libs.plugins.asciidoctor.convert)
@@ -39,6 +40,12 @@ dependencies {
     implementation libs.slf4j.api
     // 2.1: optional Jackson codec (typed JSON results), found by ServiceLoader only when the consumer has it
     compileOnly libs.jackson.databind
+
+    // Published test fixtures (2.1, incubating): consumers use testImplementation(testFixtures('io.github.woodmawa:groovy-httpclient:<v>'))
+    // or, in Maven, the classifier test-fixtures
+    testFixturesImplementation libs.groovy.json
+    testFixturesImplementation libs.slf4j.api
+    testFixturesCompileOnly libs.spock.core   // HttpClientTestTrait needs Spock; its users already have it
     testImplementation libs.jackson.databind
     // D-1: a library must not pick the logging backend for its consumers
     testImplementation libs.logback.classic   // tests capture log output with ListAppender
@@ -137,6 +144,28 @@ tasks.named('check') {
     dependsOn 'testJava25', 'integrationTest', 'integrationTestJava25'
 }
 
+// The test-fixtures variant's capability defaults to <group>:<project name>-test-fixtures, and the project is named
+// groovy-HttpClient while the artifact is groovy-httpclient: consumers asking for testFixtures('...:groovy-httpclient:v')
+// could not resolve it (found by consumerSmoke). Declare the capability to match the artifactId.
+['testFixturesApiElements', 'testFixturesRuntimeElements'].each { String n ->
+    configurations.named(n) {
+        outgoing.capability("${project.group}:groovy-httpclient-test-fixtures:${project.version}")
+    }
+}
+
+// Consumer smoke test (2.1): publish to a local file repository, then a separate build resolves the library and its
+// test fixtures from it (Gradle module metadata) and runs a spec; the spec also checks the Maven classifier artifact.
+def testRepoDir = layout.buildDirectory.dir('test-repo')
+tasks.register('consumerSmoke', Exec) {
+    description = 'Resolves the published library + test fixtures from a local repository in a separate build and runs a spec.'
+    group = 'verification'
+    dependsOn 'publishMavenJavaPublicationToTestRepoRepository'
+    workingDir = rootDir
+    def wrapper = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows') ? 'gradlew.bat' : './gradlew'
+    commandLine wrapper, '-p', 'consumer-smoke', '--console=plain', 'clean', 'test',
+            "-PlibVersion=${project.version}", "-PtestRepo=${testRepoDir.get().asFile.absolutePath}"
+}
+
 ext.featureRequiredJdks = [buildJdk, bytecodeJdk]
 apply from: 'gradle/feature-report.gradle'
 
@@ -211,6 +240,13 @@ publishing {
                     url = 'https://github.com/woodmawa/groovy-HttpClient/issues'
                 }
             }
+        }
+    }
+    repositories {
+        // consumerSmoke publishes here; never a release target
+        maven {
+            name = 'testRepo'
+            url = layout.buildDirectory.dir('test-repo')
         }
     }
 }

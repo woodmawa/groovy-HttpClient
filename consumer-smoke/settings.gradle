@@ -1,0 +1,3 @@
+// A separate build that consumes groovy-httpclient and its test fixtures from build/test-repo (see the root
+// consumerSmoke task). Run through the root wrapper: gradlew -p consumer-smoke test -PlibVersion=... -PtestRepo=...
+rootProject.name = 'groovy-httpclient-consumer-smoke'
