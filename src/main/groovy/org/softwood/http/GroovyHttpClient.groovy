@@ -241,6 +241,7 @@ class GroovyHttpClient implements AutoCloseable {
         private Http3Discovery http3Discovery
         private CodecRegistry codecRegistry
         private CodecRegistry.Builder codecBuilder
+        private Integer errorBodyPreviewChars
 
         Builder(String baseUrl) { this.baseUrl = baseUrl }
 
@@ -261,6 +262,9 @@ class GroovyHttpClient implements AutoCloseable {
 
         /** Use a registry built elsewhere (shared between clients). */
         Builder codecs(CodecRegistry registry) { this.codecRegistry = registry; this }
+
+        /** Characters of the error body shown in HttpResponseException messages (default 0 = none; 0..4096). */
+        Builder errorBodyPreviewChars(int chars) { this.errorBodyPreviewChars = chars; this }
 
         Builder connectTimeout(Duration timeout) { this.connectTimeout = timeout; this }
         Builder requestTimeout(Duration timeout) { this.requestTimeout = timeout; this }
@@ -317,13 +321,41 @@ class GroovyHttpClient implements AutoCloseable {
                     keyManagers                : keyManagers,
                     maxRedirects               : maxRedirects,
                     httpVersion                : httpVersion,
-                    http3Discovery             : http3Discovery
+                    http3Discovery             : http3Discovery,
+                    errorBodyPreviewChars      : errorBodyPreviewChars
             ])
             new GroovyHttpClient(cfg, codecRegistry ?: codecBuilder?.build())
         }
     }
 
     static Builder builder(String baseUrl) { new Builder(baseUrl) }
+
+    private static final Set<String> FIELD_NAMES =
+            Collections.unmodifiableSet(GroovyHttpClient.declaredFields.collect { it.name } as Set<String>)
+    private static final Set<String> BUILDER_FIELDS =
+            Collections.unmodifiableSet(GroovyRequestBuilder.declaredFields.collect { it.name } as Set<String>)
+    private static final MetaClass CLIENT_META = org.codehaus.groovy.runtime.InvokerHelper.getMetaClass(GroovyHttpClient)
+
+    // Called qualified from GroovyRequestBuilder.getProperty: an inner class reads outer private statics through
+    // getProperty, which would re-enter it.
+    private static boolean isBuilderField(String name) { BUILDER_FIELDS.contains(name) }
+
+    private static boolean isClientName(String name) { FIELD_NAMES.contains(name) || CLIENT_META.getMetaProperty(name) != null }
+
+    /**
+     * Unknown property names fail with MissingPropertyException (2.1). Groovy otherwise falls back to a class's
+     * {@code get(String)} method as a generic getter -- and here that is the HTTP GET verb: before 2.1
+     * {@code client.foo}, or a caller's constant or variable referenced inside a request closure, sent
+     * {@code GET /foo} and evaluated to its CompletableFuture.
+     */
+    @Override
+    Object getProperty(String name) {
+        MetaClass mc = getMetaClass()
+        if (FIELD_NAMES.contains(name) || mc.getMetaProperty(name) != null) {
+            return mc.getProperty(this, name)
+        }
+        throw new MissingPropertyException(name, GroovyHttpClient)
+    }
 
     /* =========================================================================
      * Construction
@@ -480,6 +512,24 @@ class GroovyHttpClient implements AutoCloseable {
         private String bodyContentType = null
 
         GroovyRequestBuilder(HttpRequest.Builder builder) { this.builder = builder }
+
+        /**
+         * A name that is neither a property of this builder nor a real field or property of the client is the
+         * caller's: fail here so the closure's DELEGATE_FIRST lookup falls back to its owner (2.1 fix). Groovy's
+         * own lookup for an inner class asks the enclosing client's metaclass, where get(String) -- the GET
+         * verb -- served as a generic getter, so `query(a: SOME_CONSTANT)` used to send GET /SOME_CONSTANT.
+         */
+        @Override
+        Object getProperty(String name) {
+            MetaClass mc = getMetaClass()
+            if (mc.getMetaProperty(name) != null || GroovyHttpClient.isBuilderField(name)) {
+                return mc.getProperty(this, name)
+            }
+            if (GroovyHttpClient.isClientName(name)) {
+                return GroovyHttpClient.this.getProperty(name)     // a real client field / property (e.g. codecs)
+            }
+            throw new MissingPropertyException(name, GroovyRequestBuilder)
+        }
 
         void header(String name, String value) {
             builder.header(name, value)
@@ -1029,7 +1079,7 @@ class GroovyHttpClient implements AutoCloseable {
 
         // Circuit breaker gates the overall operation
         return executeWithCircuitBreaker {
-            attemptWithRetry(ctx, chain).thenApply { HttpClientResponse r -> raiseForStatus(r) }
+            attemptWithRetry(ctx, chain).thenApply { HttpClientResponse r -> raiseForStatus(r, ctx) }
         }
     }
 
@@ -1045,7 +1095,7 @@ class GroovyHttpClient implements AutoCloseable {
                         }
                         // byte-accurate maxResponseBytes
                         if (maxResponseBytes != Long.MAX_VALUE && resp.body() != null && resp.body().length > maxResponseBytes) {
-                            throw new HttpResponseException(413, "Body too large (>${maxResponseBytes} bytes)")
+                            throw new ResponseTooLargeException(maxResponseBytes, resp.body().length, ctx.method, ctx.uri)
                         }
 
                         // >= 400 is raised AFTER retry (raiseForStatus), so status-based retry can see the
@@ -1114,8 +1164,8 @@ class GroovyHttpClient implements AutoCloseable {
         promise
     }
 
-    private static HttpClientResponse raiseForStatus(HttpClientResponse r) {
-        if (r.statusCode >= 400) throw new HttpResponseException(r.statusCode, r.body)
+    private HttpClientResponse raiseForStatus(HttpClientResponse r, RequestContext ctx) {
+        if (r.statusCode >= 400) throw new HttpResponseException(r, ctx.method, ctx.uri, config.errorBodyPreviewChars)
         r
     }
 
@@ -1176,7 +1226,15 @@ class GroovyHttpClient implements AutoCloseable {
     private static final Set<String> CREDENTIAL_HEADERS = ['authorization', 'proxy-authorization', 'cookie'] as Set<String>
 
     private CompletableFuture<HttpResponse<byte[]>> sendFollowingRedirects(HttpRequest req, int hop) {
-        httpClient.sendAsync(req, boundedBodyHandler()).thenCompose { HttpResponse<byte[]> resp ->
+        // HTTP/2 and HTTP/3 fail a cancelled stream with their own cause-less IOException, so the size-limit
+        // exception travels in a side channel and replaces it (2.0 surfaced a retryable IOException there).
+        def tooLarge = new java.util.concurrent.atomic.AtomicReference<ResponseTooLargeException>()
+        httpClient.sendAsync(req, boundedBodyHandler(req, tooLarge)).handle { HttpResponse<byte[]> r, Throwable err ->
+            if (err == null) return r
+            ResponseTooLargeException limit = tooLarge.get()
+            if (limit != null) throw limit
+            throw (err instanceof CompletionException ? err : new CompletionException(err))
+        }.thenCompose { HttpResponse<byte[]> resp ->
             if (!config.allowRedirects || !REDIRECT_CODES.contains(resp.statusCode())) {
                 return CompletableFuture.completedFuture(resp)
             }
@@ -1239,9 +1297,12 @@ class GroovyHttpClient implements AutoCloseable {
      * Bounded response bodies (SEC-5): stop reading once maxResponseBytes is crossed
      * ========================================================================= */
 
-    private HttpResponse.BodyHandler<byte[]> boundedBodyHandler() {
+    private HttpResponse.BodyHandler<byte[]> boundedBodyHandler(HttpRequest req,
+            java.util.concurrent.atomic.AtomicReference<ResponseTooLargeException> sink = null) {
         long max = maxResponseBytes
-        return { HttpResponse.ResponseInfo info -> new BoundedBodySubscriber(max) } as HttpResponse.BodyHandler<byte[]>
+        String method = req?.method()
+        URI uri = req?.uri()
+        return { HttpResponse.ResponseInfo info -> new BoundedBodySubscriber(max, method, uri, sink) } as HttpResponse.BodyHandler<byte[]>
     }
 
     @CompileStatic
@@ -1252,7 +1313,17 @@ class GroovyHttpClient implements AutoCloseable {
         private Flow.Subscription subscription
         private long received = 0L
 
-        BoundedBodySubscriber(long max) { this.max = max }
+        private final String method
+        private final URI uri
+        private final java.util.concurrent.atomic.AtomicReference<ResponseTooLargeException> sink
+
+        BoundedBodySubscriber(long max, String method = null, URI uri = null,
+                              java.util.concurrent.atomic.AtomicReference<ResponseTooLargeException> sink = null) {
+            this.max = max
+            this.method = method
+            this.uri = uri
+            this.sink = sink
+        }
 
         @Override
         CompletionStage<byte[]> getBody() { result }
@@ -1270,8 +1341,10 @@ class GroovyHttpClient implements AutoCloseable {
                 int n = bb.remaining()
                 received += n
                 if (max != Long.MAX_VALUE && received > max) {
+                    ResponseTooLargeException limit = new ResponseTooLargeException(max, received, method, uri)
+                    if (sink != null) sink.set(limit)
+                    result.completeExceptionally(limit)
                     subscription.cancel()
-                    result.completeExceptionally(new HttpResponseException(413, 'Response body exceeds maxResponseBytes (' + max + ')'))
                     return
                 }
                 byte[] chunk = new byte[n]
@@ -1462,7 +1535,7 @@ class GroovyHttpClient implements AutoCloseable {
 
         executeWithCircuitBreaker {
             // >= 400 raised after retry; the breaker counts only transient errors and 5xx
-            attemptWithRetry(ctx, chain).thenApply { HttpClientResponse r -> raiseForStatus(r) }
+            attemptWithRetry(ctx, chain).thenApply { HttpClientResponse r -> raiseForStatus(r, ctx) }
         }
     }
 
@@ -1724,23 +1797,151 @@ class GroovyHttpClient implements AutoCloseable {
         CircuitOpenException(String message) { super(message) }
     }
 
+    /**
+     * A response with status >= 400 (raised after retries), or a client-side limit ({@link ResponseTooLargeException}).
+     *
+     * The message holds no response body unless {@code SecurityConfig.errorBodyPreviewChars} opts in (SEC-11, 2.1):
+     * <pre>HTTP 404 Not Found (GET https://api.example.com/orders/42, 1284 bytes, application/problem+json)</pre>
+     * The URI there is {@code loggableUri}: no query string, no userinfo. Everything else is on fields:
+     * headers, body, bytes, the full URI, {@code bodyAs(Type)}, {@code json} and RFC 9457 {@code problem}.
+     */
     static class HttpResponseException extends RuntimeException {
-        static final int MESSAGE_BODY_CHARS = 120
-        final int statusCode
-        /** The full response body. Kept out of the message (SEC-11) so logging the exception does not log it. */
-        final String responseBody
+        private static final long serialVersionUID = 2L
+        /** Upper bound for SecurityConfig.errorBodyPreviewChars. */
+        static final int MAX_PREVIEW_CHARS = 4096
 
+        final int statusCode
+        /** Standard RFC 9110 phrase for statusCode ('' for a code with none); never the server's own text. */
+        final String reasonPhrase
+        /** Request method, or null when unknown. */
+        final String method
+        /** The full request URI (query included) -- log it with care; the message uses loggableUri. */
+        final URI uri
+        /** Response headers, case-insensitive, unmodifiable. */
+        final Map<String, List<String>> responseHeaders
+        /** Response Content-Type, or null. */
+        final MediaType contentType
+        /** The full response body as text. Kept out of the message (SEC-11). */
+        final String responseBody
+        private final byte[] bytes
+        private final transient CodecRegistry codecs
+        private transient volatile boolean problemTried
+        private transient volatile ProblemDetail problemCache
+
+        /** @deprecated since 2.1: the client builds these from the response; kept for code that constructs them. */
+        @Deprecated
         HttpResponseException(int statusCode, String responseBody) {
-            super(describe(statusCode, responseBody))
-            this.statusCode = statusCode
-            this.responseBody = responseBody
+            this(statusCode, null, null, null, null,
+                    responseBody == null ? new byte[0] : responseBody.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    responseBody, CodecRegistry.defaults(), 0, null)
         }
 
-        private static String describe(int status, String body) {
-            if (!body) return 'HTTP error: ' + status
-            String flat = body.replaceAll(/\p{Cntrl}+/, ' ').trim()
-            String shown = flat.length() > MESSAGE_BODY_CHARS ? flat.substring(0, MESSAGE_BODY_CHARS) + '...' : flat
-            'HTTP error: ' + status + ' (' + body.length() + ' chars), body starts: ' + shown
+        HttpResponseException(HttpClientResponse r, String method, URI uri, int previewChars = 0) {
+            this(r.statusCode, method, uri, r.headers, r.contentType, r.bytes, r.body, r.codecs, previewChars, null)
+        }
+
+        protected HttpResponseException(int statusCode, String method, URI uri, Map<String, List<String>> headers,
+                                        String contentTypeHeader, byte[] bytes, String body, CodecRegistry codecs,
+                                        int previewChars, String message) {
+            super(message ?: describe(statusCode, method, uri, bytes == null ? 0L : (long) bytes.length,
+                    contentTypeHeader, body, previewChars))
+            this.statusCode = statusCode
+            this.reasonPhrase = ReasonPhrases.of(statusCode)
+            this.method = method
+            this.uri = uri
+            this.responseHeaders = copyHeaders(headers)
+            this.contentType = MediaType.parseOrNull(contentTypeHeader)
+            this.responseBody = body
+            this.bytes = bytes ?: new byte[0]
+            this.codecs = codecs
+        }
+
+        /** A copy of the raw response bytes. */
+        byte[] getResponseBytes() { bytes.clone() }
+
+        /** First value of a response header, case-insensitive. */
+        String header(String name) { responseHeaders.get(name)?.getAt(0) }
+
+        /** The body parsed for its Content-Type by the client's codec registry. */
+        Object getParsed() { requireCodecs().parse(bytes, contentType, Object) }
+
+        /** The body as JSON, whatever the Content-Type says. */
+        Object getJson() {
+            def t = MediaType.parse('application/json')
+            requireCodecs().parse(bytes, contentType?.charset ? t.withCharset(contentType.charset) : t, Object)
+        }
+
+        /** The body as an instance of type (Jackson when present, else Groovy coercion). */
+        def <T> T bodyAs(Class<T> type) { (T) requireCodecs().parse(bytes, contentType, type) }
+
+        /** RFC 9457 problem details when the Content-Type is application/problem+json and it parses; else null. */
+        ProblemDetail getProblem() {
+            if (!problemTried) {
+                problemCache = null
+                if (contentType?.essence == 'application/problem+json') {
+                    try {
+                        def parsed = requireCodecs().parse(bytes, contentType, Object)
+                        if (parsed instanceof Map) problemCache = ProblemDetail.from((Map) parsed)
+                    } catch (RuntimeException ignored) {
+                        problemCache = null
+                    }
+                }
+                problemTried = true
+            }
+            problemCache
+        }
+
+        private CodecRegistry requireCodecs() {
+            if (codecs == null) {
+                throw new IllegalStateException('No codec registry on this exception (it was deserialised); use responseBody / responseBytes')
+            }
+            codecs
+        }
+
+        private static Map<String, List<String>> copyHeaders(Map<String, List<String>> h) {
+            def m = new TreeMap<String, List<String>>(String.CASE_INSENSITIVE_ORDER)
+            h?.each { k, v -> if (k != null) m.put(k.toString(), Collections.unmodifiableList(new ArrayList<String>(v ?: []))) }
+            Collections.unmodifiableMap(m)
+        }
+
+        static String describe(int status, String method, URI uri, long size, String contentTypeHeader, String body,
+                               int previewChars) {
+            List<String> parts = []
+            if (uri != null) parts << (method ? method + ' ' : '') + loggableUri(uri)
+            parts << size + ' bytes'
+            String essence = MediaType.parseOrNull(contentTypeHeader)?.essence
+            if (essence) parts << essence
+            String reason = ReasonPhrases.of(status)
+            StringBuilder sb = new StringBuilder('HTTP ').append(status)
+            if (reason) sb.append(' ').append(reason)
+            sb.append(' (').append(parts.join(', ')).append(')')
+            if (previewChars > 0 && body) {
+                String flat = body.replaceAll(/\p{Cntrl}+/, ' ').trim()
+                sb.append(': ').append(flat.length() > previewChars ? flat.substring(0, previewChars) + '...' : flat)
+            }
+            sb.toString()
+        }
+    }
+
+    /**
+     * The response was larger than maxResponseBytes (a client-side limit, not the server's 413): reading stopped
+     * once the limit was crossed. statusCode is 413 so 2.0 checks keep working; catch this type to tell them apart.
+     */
+    static class ResponseTooLargeException extends HttpResponseException {
+        private static final long serialVersionUID = 1L
+        /** The maxResponseBytes in force. */
+        final long limit
+        /** Bytes read when the limit was crossed (at least limit + 1). */
+        final long bytesRead
+
+        ResponseTooLargeException(long limit, long bytesRead, String method = null, URI uri = null) {
+            super(413, method, uri, null, null, new byte[0], '', CodecRegistry.defaults(), 0, tooLarge(limit, method, uri))
+            this.limit = limit
+            this.bytesRead = bytesRead
+        }
+
+        private static String tooLarge(long limit, String method, URI uri) {
+            'Response exceeded maxResponseBytes (' + limit + ')' + (uri != null ? ' (' + (method ? method + ' ' : '') + loggableUri(uri) + ')' : '')
         }
     }
 

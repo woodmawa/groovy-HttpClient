@@ -75,6 +75,11 @@ class SecurityConfig {
     final boolean enableMetrics
     final boolean allowRedirects
     final int maxRedirects
+    /**
+     * Characters of the response body appended to HttpResponseException messages (2.1). Default 0: messages carry
+     * no body, because messages end up in logs (SEC-11). {@link #testing} uses 120. Range 0..4096.
+     */
+    final int errorBodyPreviewChars
 
     // Protocol
     /** Preferred HTTP version (default HTTP_2). HTTP_3 needs JDK 26+ at runtime; otherwise the client falls back to HTTP_2. */
@@ -106,7 +111,7 @@ class SecurityConfig {
             'cookiePolicy', 'allowedHosts', 'enableLogging', 'enableMetrics', 'allowRedirects', 'maxRedirects',
             'failureThreshold', 'resetTimeoutMs', 'retryPolicy', 'enforceHostnameVerification', 'allowedTlsProtocols',
             'allowedCipherSuites', 'sslContext', 'trustStore', 'trustManagers', 'keyManagers',
-            'httpVersion', 'http3Discovery'
+            'httpVersion', 'http3Discovery', 'errorBodyPreviewChars'
     ] as LinkedHashSet<String>).asImmutable()
 
     /**
@@ -139,6 +144,7 @@ class SecurityConfig {
         this.enableMetrics               = opt(a, 'enableMetrics', true) as boolean
         this.allowRedirects              = opt(a, 'allowRedirects', true) as boolean
         this.maxRedirects                = opt(a, 'maxRedirects', DEFAULT_MAX_REDIRECTS) as int
+        this.errorBodyPreviewChars       = opt(a, 'errorBodyPreviewChars', 0) as int
         this.http3Discovery              = toEnum(Http3Discovery, opt(a, 'http3Discovery', null))
         this.httpVersion                 = toEnum(HttpVersion, opt(a, 'httpVersion',
                 http3Discovery != null ? HttpVersion.HTTP_3 : HttpVersion.HTTP_2))
@@ -177,6 +183,9 @@ class SecurityConfig {
         }
         if (maxResponseBytes <= 0) throw new IllegalArgumentException("maxResponseBytes must be > 0 (use Long.MAX_VALUE for no limit)")
         if (maxRedirects < 0) throw new IllegalArgumentException("maxRedirects must be >= 0")
+        if (errorBodyPreviewChars < 0 || errorBodyPreviewChars > GroovyHttpClient.HttpResponseException.MAX_PREVIEW_CHARS) {
+            throw new IllegalArgumentException("errorBodyPreviewChars must be 0..${GroovyHttpClient.HttpResponseException.MAX_PREVIEW_CHARS} (was ${errorBodyPreviewChars})")
+        }
     }
 
     private static SSLContext buildSslContext(KeyStore trustStore, TrustManager[] trustManagers, KeyManager[] keyManagers) {
@@ -264,6 +273,7 @@ class SecurityConfig {
                 cookiePolicy     : CookiePolicy.ACCEPT_ALL,
                 enableLogging    : true,
                 enableMetrics    : false,
+                errorBodyPreviewChars: 120,   // readable test failures; never use in production
                 retryPolicy      : new GroovyHttpClient.RetryPolicy.Config().tap {
                     maxAttempts(1) // no retries in tests unless enabled per request
                 }.build()
@@ -311,6 +321,7 @@ class SecurityConfig {
                 enableMetrics              : enableMetrics,
                 allowRedirects             : allowRedirects,
                 maxRedirects               : maxRedirects,
+                errorBodyPreviewChars      : errorBodyPreviewChars,
                 httpVersion                : httpVersion,
                 http3Discovery             : http3Discovery,
                 failureThreshold           : failureThreshold,

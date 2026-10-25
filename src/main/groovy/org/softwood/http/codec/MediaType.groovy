@@ -20,7 +20,9 @@ import java.nio.charset.UnsupportedCharsetException
  */
 @CompileStatic
 @EqualsAndHashCode(includes = ['type', 'subtype'])
-final class MediaType {
+final class MediaType implements Serializable {
+
+    private static final long serialVersionUID = 1L
 
     static final MediaType ANY = parse('*/*')
 

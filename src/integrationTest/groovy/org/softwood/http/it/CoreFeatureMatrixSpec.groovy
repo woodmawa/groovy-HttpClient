@@ -273,7 +273,7 @@ class CoreFeatureMatrixSpec extends IntegrationSpec {
         def e = thrown(HttpResponseException)
         e.statusCode == status
         e.responseBody == "body-for-${status}".toString()
-        e.message.startsWith("HTTP error: ${status}")
+        e.message.startsWith("HTTP ${status} ${e.reasonPhrase} (GET ")   // 2.1 format; body only via errorBodyPreviewChars
 
         where:
         [protocol, status] << [Protocol.available(), [404, 503]].combinations()
