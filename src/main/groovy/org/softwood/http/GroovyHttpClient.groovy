@@ -26,6 +26,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.ByteBuffer
 import java.nio.charset.Charset
+import java.nio.file.Files
 import java.nio.file.Path
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
@@ -557,6 +558,7 @@ class GroovyHttpClient implements AutoCloseable {
         private LineStreamTarget.Kind streamKind = null
         private Closure streamConsumer = null
         private Duration idleTimeoutOverride = null
+        private boolean oneShotBody = false
 
         GroovyRequestBuilder(HttpRequest.Builder builder) { this.builder = builder }
 
@@ -740,6 +742,60 @@ class GroovyHttpClient implements AutoCloseable {
             byte[] bytes = obj instanceof byte[] ? (byte[]) obj : codecs.encode(obj, type)
             bodyPublisher = HttpRequest.BodyPublishers.ofByteArray(bytes)
             bodyContentType = ct
+            oneShotBody = false
+        }
+
+        /**
+         * Stream a file as the request body (2.1): sent with its Content-Length and read as it is sent, never held in
+         * memory. Replayable, so retries and 307/308 redirects re-send it. Content type: as given, else probed from the
+         * file name, else application/octet-stream. A missing file fails here, before anything is sent.
+         */
+        void body(Path file, String contentType = null) {
+            if (file == null) throw new IllegalArgumentException('body file must not be null')
+            if (!Files.isRegularFile(file)) throw new FileNotFoundException("Upload file not found: ${file}".toString())
+            bodyPublisher = HttpRequest.BodyPublishers.ofFile(file)
+            bodyContentType = contentType ?: (probeContentType(file) ?: 'application/octet-stream')
+            oneShotBody = false
+        }
+
+        void body(File file, String contentType = null) { body(file?.toPath(), contentType) }
+
+        /**
+         * Stream an InputStream as the request body (2.1), chunked; the caller closes it. One-shot: the request is
+         * never retried, whatever the retry policy says, and a 307/308 redirect fails with RedirectRejectedException.
+         */
+        void body(InputStream input, String contentType) {
+            if (input == null) throw new IllegalArgumentException('body stream must not be null')
+            AtomicBoolean used = new AtomicBoolean(false)
+            bodyPublisher = HttpRequest.BodyPublishers.ofInputStream({ ->
+                if (!used.compareAndSet(false, true)) {
+                    throw new IllegalStateException('A one-shot request body (InputStream) cannot be sent twice')
+                }
+                input
+            } as Supplier<InputStream>)
+            bodyContentType = contentType ?: 'application/octet-stream'
+            oneShotBody = true
+        }
+
+        /**
+         * Stream a Flow.Publisher as the request body (2.1), chunked. One-shot, like an InputStream body. The client
+         * subscribes when the request is sent: a hot publisher (e.g. SubmissionPublisher) drops what it emits before then.
+         */
+        void body(Flow.Publisher<ByteBuffer> publisher, String contentType) {
+            if (publisher == null) throw new IllegalArgumentException('body publisher must not be null')
+            bodyPublisher = HttpRequest.BodyPublishers.fromPublisher(publisher)
+            bodyContentType = contentType ?: 'application/octet-stream'
+            oneShotBody = true
+        }
+
+        boolean isOneShotBody() { oneShotBody }
+
+        private static String probeContentType(Path file) {
+            try {
+                return Files.probeContentType(file)
+            } catch (IOException ignored) {
+                return null
+            }
         }
 
         /**
@@ -1324,6 +1380,7 @@ class GroovyHttpClient implements AutoCloseable {
         ctx.maxResponseBytes = wrapped.getMaxResponseBytesOrNull() ?: maxResponseBytes
         ctx.streamTarget = streamTargetFor(wrapped)
         ctx.idleTimeoutMs = wrapped.getIdleTimeoutOrNull()?.toMillis() ?: 0L
+        ctx.oneShotBody = wrapped.isOneShotBody()
 
         def chain = buildInterceptorChain()
 
@@ -1480,7 +1537,7 @@ class GroovyHttpClient implements AutoCloseable {
                 // SEC-4: the chain now returns 4xx/5xx responses, so status-code retry can actually fire
                 // a stream target that has handed bytes to the caller cannot be replayed (2.1)
                 boolean again = retryable && attempt.get() < policy.maxAttempts &&
-                        (ctx.streamTarget == null || ctx.streamTarget.retryable) &&
+                        (ctx.streamTarget == null || ctx.streamTarget.retryable) && !ctx.oneShotBody &&
                         (cause == null ? policy.shouldRetry(null, resp) : policy.shouldRetry(cause, null))
                 if (again) {
                     long delayMs = policy.nextDelayMs(attempt.get())
@@ -1599,6 +1656,11 @@ class GroovyHttpClient implements AutoCloseable {
             }
             URI target = req.uri().resolve(location.get().trim())
             checkRedirectTarget(req.uri(), target)
+            int code = resp.statusCode()
+            if (ctx?.oneShotBody && (code == 307 || code == 308)) {
+                throw new RedirectRejectedException(("A ${code} redirect to ${loggableUri(target)} must re-send the request body, " +
+                        'but a one-shot body (InputStream or Publisher) cannot be re-sent; use a Path or byte[] body to allow it').toString())
+            }
             if (config.enableLogging) {
                 log.info("[GroovyHttpClient] following {} redirect {} -> {}", resp.statusCode(), loggableUri(req.uri()), loggableUri(target))
             }
@@ -2150,6 +2212,8 @@ class GroovyHttpClient implements AutoCloseable {
         StreamTarget streamTarget = null
         /** Per-request idleTimeout in ms (2.1); 0 = off. */
         long idleTimeoutMs = 0L
+        /** The body is an InputStream / Publisher that can be sent once only: no retry, no 307/308 (2.1). */
+        boolean oneShotBody = false
 
         // Optional helper if user writes interceptor { ctx -> ctx.proceed() }
         Closure<CompletableFuture<HttpClientResponse>> proceed

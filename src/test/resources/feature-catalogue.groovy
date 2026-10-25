@@ -70,7 +70,7 @@
     [id: 'codec.typed-result',   title: 'Typed results: get(Customer)',                               status: 'implemented', version: '2.1', integration: false],
     [id: 'codec.jackson',        title: 'Optional Jackson codec via ServiceLoader',                   status: 'implemented', version: '2.1', integration: false],
     [id: 'stream.download-path', title: 'Download to Path / OutputStream, maxResponseBytes enforced', status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
-    [id: 'stream.upload',        title: 'Streaming upload from Path / InputStream / Publisher',       status: 'planned', version: '2.1', integration: true,  protocols: ALL],
+    [id: 'stream.upload',        title: 'Streaming upload from Path / InputStream / Publisher',       status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
     [id: 'stream.lines',         title: 'Line stream consumer: lines {}, StreamControl.stop(), idleTimeout, maxStreamItemBytes', status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
     [id: 'stream.sse',           title: 'Server-Sent Events consumer (WHATWG parsing, GET or POST, no reconnect)', status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
     [id: 'stream.ndjson',        title: 'NDJSON consumer (parsed values, bad line names its number)',  status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
