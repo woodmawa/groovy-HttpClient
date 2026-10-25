@@ -351,6 +351,7 @@ class MockHttpServer {
 
     private void handleRequest(HttpExchange ex, RequestCheck check) {
         check.received << RecordedRequest.from(ex)
+        if (check.delayMs > 0) Thread.sleep(check.delayMs)   // withDelay: was recorded but never applied before 2.1
         def method = ex.requestMethod
         def requestHeaders = ex.requestHeaders
         def cookies = parseCookies(ex)

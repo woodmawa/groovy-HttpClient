@@ -62,6 +62,14 @@ final class AuthPolicy {
             choose(new Auth.ApiKey(args?.header as String, args?.query as String, args?.value as String))
         }
 
+        /**
+         * OAuth2 client credentials: oauth2 { tokenUrl '...'; clientId '...'; clientSecret '...'; scope 'a', 'b' }.
+         * Optional: clientAuth 'post', skew Duration, param 'audience', '...'.
+         */
+        void oauth2(@DelegatesTo(value = OAuth2ClientCredentials.Config, strategy = Closure.DELEGATE_FIRST) Closure dsl) {
+            choose(OAuth2ClientCredentials.from(dsl))
+        }
+
         /** Also send credentials to these hosts (beyond the base URL origin). */
         void authHosts(String... hosts) {
             for (String h : hosts) if (h) hostsAllowed.add(norm(h))

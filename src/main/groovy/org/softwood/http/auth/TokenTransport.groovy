@@ -12,4 +12,7 @@ import java.util.concurrent.CompletableFuture
 @CompileStatic
 interface TokenTransport {
     CompletableFuture<HttpResponse<byte[]>> postForm(URI uri, Map<String, String> headers, String formBody)
+
+    /** True when the client was built with insecureAllowed: a plain-HTTP token endpoint is then accepted. */
+    boolean isInsecureAllowed()
 }

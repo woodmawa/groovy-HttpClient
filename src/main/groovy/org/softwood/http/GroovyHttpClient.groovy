@@ -235,14 +235,23 @@ class GroovyHttpClient implements AutoCloseable {
     }
 
     /** The token endpoint transport for OAuth2: this client's HttpClient, no allowedHosts / retry / interceptors. */
-    private final TokenTransport tokenTransport = { URI uri, Map<String, String> headers, String form ->
-        HttpRequest.Builder b = HttpRequest.newBuilder(uri).timeout(config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT)
-                .header('Content-Type', 'application/x-www-form-urlencoded')
-                .header('Accept', 'application/json')
-        headers?.each { String k, String v -> b.header(k, v) }
-        HttpRequest req = b.POST(HttpRequest.BodyPublishers.ofString(form ?: '')).build()
-        httpClient.sendAsync(req, boundedBodyHandler(req))
-    } as TokenTransport
+    private final TokenTransport tokenTransport = new TokenTransport() {
+        @Override
+        CompletableFuture<HttpResponse<byte[]>> postForm(URI uri, Map<String, String> headers, String form) {
+            HttpRequest.Builder b = HttpRequest.newBuilder(uri).timeout(config.requestTimeout ?: DEFAULT_REQUEST_TIMEOUT)
+                    .header('Content-Type', 'application/x-www-form-urlencoded')
+                    .header('Accept', 'application/json')
+            headers?.each { String k, String v -> b.header(k, v) }
+            if (effectiveHttpVersion == HttpVersion.HTTP_3 && config.http3Discovery != null) {
+                Http3Support.applyDiscovery(b, config.http3Discovery)
+            }
+            HttpRequest req = b.POST(HttpRequest.BodyPublishers.ofString(form ?: '')).build()
+            httpClient.sendAsync(req, boundedBodyHandler(req))
+        }
+
+        @Override
+        boolean isInsecureAllowed() { config.insecureAllowed }
+    }
 
     /** Default response { } handlers for every request; a request's own handlers win per key. Null clears them. */
     GroovyHttpClient defaultResponse(@DelegatesTo(value = ResponseHandlers, strategy = Closure.DELEGATE_FIRST) Closure handlers) {

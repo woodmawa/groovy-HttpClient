@@ -235,6 +235,14 @@ class FeatureServer {
                     }
                     response.headers.put('WWW-Authenticate', 'Basic realm="it"')
                     return send(request, response, callback, 401, 'text/plain; charset=UTF-8', 'unauthorised')
+                case '/oauth/token':
+                    // OAuth2 client credentials (client_secret_basic it-client:it-secret) -> the /auth/bearer token
+                    String client = 'Basic ' + 'it-client:it-secret'.bytes.encodeBase64().toString()
+                    if (request.method == 'POST' && request.headers.get('Authorization') == client) {
+                        return send(request, response, callback, 200, 'application/json',
+                                JsonOutput.toJson([access_token: BEARER_TOKEN, token_type: 'Bearer', expires_in: 3600]))
+                    }
+                    return send(request, response, callback, 401, 'application/json', '{"error":"invalid_client"}')
                 case '/auth/bearer':
                     if (request.headers.get('Authorization') == "Bearer ${BEARER_TOKEN}".toString()) {
                         return send(request, response, callback, 200, 'text/plain; charset=UTF-8', 'authorised')
