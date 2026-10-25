@@ -12,6 +12,7 @@ slf4j         = "2.0.20"
 logback       = "1.6.5"
 asciidoctor   = "4.0.5"
 nexusPublish  = "2.0.0"
+jackson       = "2.21.5"   # 2.x LTS line (com.fasterxml); 2.21.5 carries the @JsonView CVE fixes
 
 [libraries]
 groovy               = { module = "org.apache.groovy:groovy",      version.ref = "groovy" }
@@ -19,6 +20,8 @@ groovy-json          = { module = "org.apache.groovy:groovy-json", version.ref =
 groovy-xml           = { module = "org.apache.groovy:groovy-xml",  version.ref = "groovy" }
 slf4j-api            = { module = "org.slf4j:slf4j-api",           version.ref = "slf4j" }
 logback-classic      = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+# Optional at runtime: compileOnly for the library, testImplementation for its specs (2.1 codec registry)
+jackson-databind     = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 
 spock-core           = { module = "org.spockframework:spock-core", version.ref = "spock" }
 junit-bom            = { module = "org.junit:junit-bom",           version.ref = "junit" }

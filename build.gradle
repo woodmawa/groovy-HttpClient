@@ -37,6 +37,9 @@ dependencies {
     implementation libs.groovy.json
     implementation libs.groovy.xml
     implementation libs.slf4j.api
+    // 2.1: optional Jackson codec (typed JSON results), found by ServiceLoader only when the consumer has it
+    compileOnly libs.jackson.databind
+    testImplementation libs.jackson.databind
     // D-1: a library must not pick the logging backend for its consumers
     testImplementation libs.logback.classic   // tests capture log output with ListAppender
 

@@ -6,6 +6,9 @@ import groovy.transform.Immutable
 import groovy.transform.ImmutableOptions
 import groovy.util.logging.Slf4j
 import groovy.xml.XmlSlurper
+import org.softwood.http.codec.BuiltinCodecs
+import org.softwood.http.codec.CodecRegistry
+import org.softwood.http.codec.MediaType
 
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLParameters
@@ -202,6 +205,9 @@ class GroovyHttpClient implements AutoCloseable {
 
     final SimpleCookieHandler cookieHandler = new SimpleCookieHandler()
 
+    /** Encoders for request bodies and parsers for responses, by media type (2.1). Immutable, shared. */
+    final CodecRegistry codecs
+
     // Optional: manage executor lifecycle
     private final def executor
 
@@ -233,8 +239,28 @@ class GroovyHttpClient implements AutoCloseable {
         private Integer maxRedirects
         private Object httpVersion
         private Http3Discovery http3Discovery
+        private CodecRegistry codecRegistry
+        private CodecRegistry.Builder codecBuilder
 
         Builder(String baseUrl) { this.baseUrl = baseUrl }
+
+        /**
+         * Register encoders and parsers by media type (2.1):
+         * <pre>codecs { parser 'application/vnd.tmf+json', { String text -> ... }; jackson myMapper }</pre>
+         * Built-ins (JSON, XML, text, form, CSV) and any ServiceLoader provider (Jackson) stay registered;
+         * yours win at the same match rank.
+         */
+        Builder codecs(@DelegatesTo(value = CodecRegistry.Builder, strategy = Closure.DELEGATE_FIRST) Closure c) {
+            if (codecBuilder == null) codecBuilder = CodecRegistry.builder()
+            Closure dsl = (Closure) c.clone()
+            dsl.delegate = codecBuilder
+            dsl.resolveStrategy = Closure.DELEGATE_FIRST
+            dsl.call(codecBuilder)
+            this
+        }
+
+        /** Use a registry built elsewhere (shared between clients). */
+        Builder codecs(CodecRegistry registry) { this.codecRegistry = registry; this }
 
         Builder connectTimeout(Duration timeout) { this.connectTimeout = timeout; this }
         Builder requestTimeout(Duration timeout) { this.requestTimeout = timeout; this }
@@ -293,7 +319,7 @@ class GroovyHttpClient implements AutoCloseable {
                     httpVersion                : httpVersion,
                     http3Discovery             : http3Discovery
             ])
-            new GroovyHttpClient(cfg)
+            new GroovyHttpClient(cfg, codecRegistry ?: codecBuilder?.build())
         }
     }
 
@@ -317,10 +343,12 @@ class GroovyHttpClient implements AutoCloseable {
 
     private final HttpVersion effectiveHttpVersion
 
-    GroovyHttpClient(SecurityConfig config) {
+    /** @param codecs the codec registry; null = {@link CodecRegistry#defaults()} (built-ins + ServiceLoader providers) */
+    GroovyHttpClient(SecurityConfig config, CodecRegistry codecs = null) {
         if (config == null) throw new IllegalArgumentException("SecurityConfig is required")
 
         this.config = config
+        this.codecs = codecs ?: CodecRegistry.defaults()
         this.host = URI.create(config.baseUrl)
 
         this.cookieManager = new CookieManager(null, config.cookiePolicy ?: CookiePolicy.ACCEPT_ORIGINAL_SERVER)
@@ -518,16 +546,31 @@ class GroovyHttpClient implements AutoCloseable {
 
         /** application/x-www-form-urlencoded */
         void form(Map<String, ?> params, Charset charset = Charset.forName("UTF-8")) {
-            def encoded = encodeForm(params ?: [:], charset)
-            bodyPublisher = HttpRequest.BodyPublishers.ofString(encoded, charset)
-            bodyContentType = "application/x-www-form-urlencoded; charset=${charset.name()}"
+            body(params ?: [:], "application/x-www-form-urlencoded; charset=${charset.name()}".toString())
         }
 
-        /** JSON encode + set Content-Type */
+        /** JSON encode + set Content-Type (a String is sent verbatim). */
         void json(Object obj, Charset charset = Charset.forName("UTF-8")) {
-            def jsonText = (obj instanceof CharSequence) ? obj.toString() : groovy.json.JsonOutput.toJson(obj)
-            bodyPublisher = HttpRequest.BodyPublishers.ofString(jsonText, charset)
-            bodyContentType = "application/json; charset=${charset.name()}"
+            body(obj, "application/json; charset=${charset.name()}".toString())
+        }
+
+        /**
+         * Request body encoded by the client's codec registry for this Content-Type (2.1). Without a type:
+         * byte[] = application/octet-stream, CharSequence = text/plain, anything else = application/json
+         * (all UTF-8). A byte[] is always sent as is. IllegalArgumentException when no encoder handles the type.
+         */
+        void body(Object obj, String contentType = null) {
+            String ct = contentType ?: defaultContentType(obj)
+            MediaType type = MediaType.parse(ct)
+            byte[] bytes = obj instanceof byte[] ? (byte[]) obj : codecs.encode(obj, type)
+            bodyPublisher = HttpRequest.BodyPublishers.ofByteArray(bytes)
+            bodyContentType = ct
+        }
+
+        private String defaultContentType(Object obj) {
+            if (obj instanceof byte[]) return 'application/octet-stream'
+            if (obj instanceof CharSequence) return 'text/plain; charset=UTF-8'
+            'application/json; charset=UTF-8'
         }
 
         /** Override retry policy per request */
@@ -608,7 +651,11 @@ class GroovyHttpClient implements AutoCloseable {
         /** The protocol version the exchange actually used (e.g. HTTP_3 when QUIC was negotiated). */
         final HttpVersion httpVersion
 
-        HttpClientResponse(HttpResponse<byte[]> response) {
+        /** The client's codec registry; parsed / bodyAs / as use it (defaults when built outside a client). */
+        final CodecRegistry codecs
+
+        HttpClientResponse(HttpResponse<byte[]> response, CodecRegistry codecs = null) {
+            this.codecs = codecs ?: CodecRegistry.defaults()
             this.httpVersion = Http3Support.fromJdk(response.version())
             this.bytes = response.body() ?: new byte[0]
             this.headers = response.headers().map()
@@ -689,6 +736,31 @@ class GroovyHttpClient implements AutoCloseable {
                 try { return Charset.forName(m.group(1)) } catch (ignored) { return null }
             }
             null
+        }
+
+        /** The Content-Type as a MediaType, or null when absent or malformed. */
+        MediaType getMediaType() { MediaType.parseOrNull(contentType) }
+
+        private volatile Object parsedCache
+        private volatile boolean parsedTried = false
+
+        /** The body parsed by the registry for its Content-Type (JSON Map/List, XML GPathResult, CSV rows, text...). */
+        Object getParsed() {
+            if (!parsedTried) {
+                parsedCache = codecs.parse(bytes, mediaType, Object)
+                parsedTried = true
+            }
+            parsedCache
+        }
+
+        /** The body as an instance of {@code type} (Jackson when present, else Groovy coercion). */
+        def <T> T bodyAs(Class<T> type) { (T) codecs.parse(bytes, mediaType, type) }
+
+        /** {@code response as Customer} = {@link #bodyAs}; the response itself for its own types. */
+        Object asType(Class type) {
+            if (type == null || type.isInstance(this)) return this
+            if (type == String) return body
+            bodyAs(type)
         }
 
         String toString() { body }
@@ -835,6 +907,39 @@ class GroovyHttpClient implements AutoCloseable {
         awaitResult(options(path, cfg), timeout)
     }
 
+    // Typed results (2.1): the body mapped to type by the codec registry. A >= 400 still raises.
+    def <T> CompletableFuture<T> get(Class<T> type, String path, Closure cfg = null) {
+        get(path, cfg).thenApply { HttpClientResponse r -> r.bodyAs(type) }
+    }
+    def <T> CompletableFuture<T> post(Class<T> type, String path, String body, Closure cfg = null) {
+        post(path, body, cfg).thenApply { HttpClientResponse r -> r.bodyAs(type) }
+    }
+    def <T> CompletableFuture<T> put(Class<T> type, String path, String body, Closure cfg = null) {
+        put(path, body, cfg).thenApply { HttpClientResponse r -> r.bodyAs(type) }
+    }
+    def <T> CompletableFuture<T> patch(Class<T> type, String path, String body, Closure cfg = null) {
+        patch(path, body, cfg).thenApply { HttpClientResponse r -> r.bodyAs(type) }
+    }
+    def <T> CompletableFuture<T> delete(Class<T> type, String path, Closure cfg = null) {
+        delete(path, cfg).thenApply { HttpClientResponse r -> r.bodyAs(type) }
+    }
+
+    def <T> T getSync(Class<T> type, String path, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        awaitResult(get(type, path, cfg), timeout)
+    }
+    def <T> T postSync(Class<T> type, String path, String body, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        awaitResult(post(type, path, body, cfg), timeout)
+    }
+    def <T> T putSync(Class<T> type, String path, String body, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        awaitResult(put(type, path, body, cfg), timeout)
+    }
+    def <T> T patchSync(Class<T> type, String path, String body, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        awaitResult(patch(type, path, body, cfg), timeout)
+    }
+    def <T> T deleteSync(Class<T> type, String path, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        awaitResult(delete(type, path, cfg), timeout)
+    }
+
     /* =========================================================================
      * Core send (retry + interceptor + circuit breaker)
      * ========================================================================= */
@@ -945,7 +1050,7 @@ class GroovyHttpClient implements AutoCloseable {
 
                         // >= 400 is raised AFTER retry (raiseForStatus), so status-based retry can see the
                         // response (SEC-4). Interceptors now receive 4xx/5xx responses rather than exceptions.
-                        new HttpClientResponse(resp)
+                        new HttpClientResponse(resp, codecs)
                     }
         }
 
@@ -1206,15 +1311,7 @@ class GroovyHttpClient implements AutoCloseable {
     }
 
     private static String encodeForm(Map<String, ?> params, Charset charset) {
-        params.collectMany { k, v ->
-            if (v == null) return []
-            if (v instanceof Iterable) {
-                return v.findAll { it != null }.collect { vv ->
-                    "${URLEncoder.encode(k.toString(), charset.name())}=${URLEncoder.encode(vv.toString(), charset.name())}"
-                }
-            }
-            ["${URLEncoder.encode(k.toString(), charset.name())}=${URLEncoder.encode(v.toString(), charset.name())}"]
-        }.join("&")
+        BuiltinCodecs.formString(params, charset)
     }
 
     /* =========================================================================
@@ -1689,6 +1786,7 @@ class GroovyHttpClient implements AutoCloseable {
 
     static class ContentParseException extends RuntimeException {
         ContentParseException(String message) { super(message) }
+        ContentParseException(String message, Throwable cause) { super(message, cause) }
     }
 
     /** A redirect was refused by policy: host not allowed, HTTPS to HTTP, bad scheme, or too many hops. */

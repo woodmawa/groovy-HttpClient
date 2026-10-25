@@ -64,11 +64,11 @@
     [id: 'testing.trait',        title: 'HttpClientTestTrait',                                        status: 'implemented', version: '1.0', chapter: '10-testing-trait',      integration: false],
 
     // ==== 2.1 (ideation #177) =================================================================================
-    [id: 'codec.registry',       title: 'encoder(contentType) / parser(contentType) registry',        status: 'planned', version: '2.1', integration: true,  protocols: ALL],
-    [id: 'codec.csv',            title: 'Built-in CSV encoder and parser',                            status: 'planned', version: '2.1', integration: false],
-    [id: 'codec.structured-suffix', title: '+json / +xml structured-suffix matching (problem+json, vnd.tmf+json)', status: 'planned', version: '2.1', integration: true, protocols: ALL],
-    [id: 'codec.typed-result',   title: 'Typed results: get(Customer)',                               status: 'planned', version: '2.1', integration: false],
-    [id: 'codec.jackson',        title: 'Optional Jackson codec via ServiceLoader',                   status: 'planned', version: '2.1', integration: false],
+    [id: 'codec.registry',       title: 'encoder(contentType) / parser(contentType) registry',        status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
+    [id: 'codec.csv',            title: 'Built-in CSV encoder and parser',                            status: 'implemented', version: '2.1', integration: false],
+    [id: 'codec.structured-suffix', title: '+json / +xml structured-suffix matching (problem+json, vnd.tmf+json)', status: 'implemented', version: '2.1', integration: true, protocols: ALL],
+    [id: 'codec.typed-result',   title: 'Typed results: get(Customer)',                               status: 'implemented', version: '2.1', integration: false],
+    [id: 'codec.jackson',        title: 'Optional Jackson codec via ServiceLoader',                   status: 'implemented', version: '2.1', integration: false],
     [id: 'stream.download-path', title: 'Download to Path / OutputStream, maxResponseBytes enforced', status: 'planned', version: '2.1', integration: true,  protocols: ALL],
     [id: 'stream.upload',        title: 'Streaming upload from Path / InputStream / Publisher',       status: 'planned', version: '2.1', integration: true,  protocols: ALL],
     [id: 'stream.lines',         title: 'Line / SSE / NDJSON stream reader',                          status: 'planned', version: '2.1', integration: true,  protocols: ALL],
