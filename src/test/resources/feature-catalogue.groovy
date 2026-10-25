@@ -87,8 +87,8 @@
     [id: 'auth.bearer',          title: 'Bearer token, static or supplier per attempt',               status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
     [id: 'auth.api-key',         title: 'API key (header or query), header stripped cross-origin',    status: 'implemented', version: '2.1', integration: false],
     [id: 'auth.oauth2-client-credentials', title: 'OAuth2 client credentials: cached token, single-flight refresh on 401', status: 'implemented', version: '2.1', integration: true, protocols: ALL],
-    [id: 'proxy.http',           title: 'HTTP proxy (CONNECT) configuration',                         status: 'planned', version: '2.1', integration: true,  protocols: ['HTTP_1_1', 'HTTP_2']],
-    [id: 'proxy.socks',          title: 'SOCKS proxy refused (JDK HttpClient would silently go direct)', status: 'planned', version: '2.1', integration: false],
-    [id: 'proxy.auth',           title: 'Proxy authentication; allowedHosts still checked on the target', status: 'planned', version: '2.1', integration: true, protocols: ['HTTP_1_1', 'HTTP_2']],
+    [id: 'proxy.http',           title: 'HTTP proxy (CONNECT) configuration, nonProxyHosts, noProxy',  status: 'implemented', version: '2.1', integration: true,  protocols: ['HTTP_1_1', 'HTTP_2']],
+    [id: 'proxy.socks',          title: 'SOCKS proxy refused (JDK HttpClient would silently go direct)', status: 'implemented', version: '2.1', integration: false],
+    [id: 'proxy.auth',           title: 'Proxy authentication; allowedHosts still checked on the target', status: 'implemented', version: '2.1', integration: true, protocols: ['HTTP_1_1', 'HTTP_2']],
     [id: 'testing.published-fixtures', title: 'Mock server / DSL / trait published as test fixtures', status: 'planned', version: '2.1', integration: false],
 ]

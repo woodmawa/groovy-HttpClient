@@ -92,6 +92,20 @@ class SecurityConfig {
     final long maxStreamItemBytes
     static final long DEFAULT_MAX_STREAM_ITEM_BYTES = 1_048_576L
 
+    // Proxy (2.1). Default (no proxyHost, noProxy false): the JVM's ProxySelector, as before.
+    /** Explicit HTTP proxy host; CONNECT is used for https targets. allowedHosts still applies to the target. */
+    final String proxyHost
+    final Integer proxyPort
+    /** 'http' only: 'socks' is refused (the JDK HttpClient would silently connect directly). */
+    final String proxyType
+    /** Proxy credentials, answered to the proxy's 407 only and never to a server's 401. */
+    final String proxyUser
+    final String proxyPassword
+    /** Target hosts that bypass the explicit proxy; '*' wildcards, e.g. '*.internal'. */
+    final List<String> nonProxyHosts
+    /** Connect directly, ignoring the JVM's proxy settings. */
+    final boolean noProxy
+
     // Protocol
     /** Preferred HTTP version (default HTTP_2). HTTP_3 needs JDK 26+ at runtime; otherwise the client falls back to HTTP_2. */
     final HttpVersion httpVersion
@@ -123,7 +137,8 @@ class SecurityConfig {
             'failureThreshold', 'resetTimeoutMs', 'retryPolicy', 'enforceHostnameVerification', 'allowedTlsProtocols',
             'allowedCipherSuites', 'sslContext', 'trustStore', 'trustManagers', 'keyManagers',
             'httpVersion', 'http3Discovery', 'errorBodyPreviewChars', 'compression',
-            'maxStreamItemBytes'
+            'maxStreamItemBytes', 'proxyHost', 'proxyPort', 'proxyType', 'proxyUser', 'proxyPassword', 'nonProxyHosts',
+            'noProxy'
     ] as LinkedHashSet<String>).asImmutable()
 
     /**
@@ -159,6 +174,13 @@ class SecurityConfig {
         this.errorBodyPreviewChars       = opt(a, 'errorBodyPreviewChars', 0) as int
         this.compression                 = opt(a, 'compression', false) as boolean
         this.maxStreamItemBytes          = opt(a, 'maxStreamItemBytes', DEFAULT_MAX_STREAM_ITEM_BYTES) as long
+        this.proxyHost                   = opt(a, 'proxyHost', null) as String
+        this.proxyPort                   = opt(a, 'proxyPort', null) as Integer
+        this.proxyType                   = (opt(a, 'proxyType', 'http') as String).toLowerCase(Locale.ROOT)
+        this.proxyUser                   = opt(a, 'proxyUser', null) as String
+        this.proxyPassword               = opt(a, 'proxyPassword', null) as String
+        this.nonProxyHosts               = Collections.unmodifiableList(((opt(a, 'nonProxyHosts', []) as Collection<String>) ?: []).collect { it as String })
+        this.noProxy                     = opt(a, 'noProxy', false) as boolean
         if (maxStreamItemBytes <= 0) {
             throw new IllegalArgumentException("maxStreamItemBytes must be positive (was ${maxStreamItemBytes})")
         }
@@ -203,6 +225,23 @@ class SecurityConfig {
         if (errorBodyPreviewChars < 0 || errorBodyPreviewChars > GroovyHttpClient.HttpResponseException.MAX_PREVIEW_CHARS) {
             throw new IllegalArgumentException("errorBodyPreviewChars must be 0..${GroovyHttpClient.HttpResponseException.MAX_PREVIEW_CHARS} (was ${errorBodyPreviewChars})")
         }
+        validateProxy()
+    }
+
+    private void validateProxy() {
+        if (proxyType == 'socks') throw new IllegalArgumentException(org.softwood.http.proxy.ProxySupport.SOCKS_REFUSAL)
+        if (proxyType != 'http') throw new IllegalArgumentException("proxyType must be 'http' (was '${proxyType}')")
+        if (proxyHost) {
+            if (noProxy) throw new IllegalArgumentException('noProxy and proxyHost cannot both be set')
+            if (proxyPort == null || proxyPort < 1 || proxyPort > 65535) throw new IllegalArgumentException("proxyPort must be 1..65535 (was ${proxyPort})")
+            if (httpVersion == HttpVersion.HTTP_3 && http3Discovery == Http3Discovery.HTTP_3_URI_ONLY) {
+                throw new IllegalArgumentException('HTTP/3-only (HTTP_3_URI_ONLY) cannot go through a proxy: QUIC is UDP and an HTTP proxy tunnels TCP')
+            }
+        } else {
+            if (proxyUser != null || proxyPassword != null) throw new IllegalArgumentException('proxyUser / proxyPassword need proxyHost')
+            if (nonProxyHosts) throw new IllegalArgumentException('nonProxyHosts needs proxyHost (the JVM default selector uses http.nonProxyHosts)')
+        }
+        if ((proxyUser == null) != (proxyPassword == null)) throw new IllegalArgumentException('proxyUser and proxyPassword go together')
     }
 
     private static SSLContext buildSslContext(KeyStore trustStore, TrustManager[] trustManagers, KeyManager[] keyManagers) {
@@ -341,6 +380,13 @@ class SecurityConfig {
                 errorBodyPreviewChars      : errorBodyPreviewChars,
                 compression                : compression,
                 maxStreamItemBytes         : maxStreamItemBytes,
+                proxyHost                  : proxyHost,
+                proxyPort                  : proxyPort,
+                proxyType                  : proxyType,
+                proxyUser                  : proxyUser,
+                proxyPassword              : proxyPassword,
+                nonProxyHosts              : nonProxyHosts,
+                noProxy                    : noProxy,
                 httpVersion                : httpVersion,
                 http3Discovery             : http3Discovery,
                 failureThreshold           : failureThreshold,

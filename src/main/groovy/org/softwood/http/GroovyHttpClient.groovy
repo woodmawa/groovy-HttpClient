@@ -13,6 +13,7 @@ import org.softwood.http.auth.AuthPolicy
 import org.softwood.http.auth.Credential
 import org.softwood.http.auth.TokenTransport
 import org.softwood.http.compression.ContentDecoder
+import org.softwood.http.proxy.ProxySupport
 import org.softwood.http.compression.DecodedResponse
 import org.softwood.http.compression.GzipRequestBody
 import org.softwood.http.streaming.LineStreamTarget
@@ -199,6 +200,10 @@ class GroovyHttpClient implements AutoCloseable {
 
     final SecurityConfig config
     private final URI host
+    /** How requests reach their target (explicit proxy, none, or the JVM default behind the SOCKS warning). */
+    private final ProxySelector proxySelector
+    /** Preemptive Basic Proxy-Authorization for proxyAuth, or null. */
+    private final String proxyAuthorization
     private final HttpClient httpClient
     private final CookieManager cookieManager
     private final CircuitBreaker circuitBreaker
@@ -297,6 +302,13 @@ class GroovyHttpClient implements AutoCloseable {
         private Long maxStreamItemBytes
         private Closure defaultResponse
         private Closure authDsl
+        private String proxyHost
+        private Integer proxyPort
+        private String proxyType
+        private String proxyUser
+        private String proxyPassword
+        private List<String> nonProxyHosts
+        private Boolean noProxy
 
         Builder(String baseUrl) { this.baseUrl = baseUrl }
 
@@ -329,6 +341,21 @@ class GroovyHttpClient implements AutoCloseable {
 
         /** Credentials for every request: see GroovyHttpClient.auth(Closure). */
         Builder auth(@DelegatesTo(value = AuthPolicy.Dsl, strategy = Closure.DELEGATE_FIRST) Closure dsl) { this.authDsl = dsl; this }
+
+        /** An HTTP proxy for every request (CONNECT for https targets). allowedHosts still applies to the target. */
+        Builder proxy(String host, int port) { proxy(host, port, 'http') }
+
+        /** type 'http' only; 'socks' is refused at build() (the JDK HttpClient would silently connect directly). */
+        Builder proxy(String host, int port, String type) { this.proxyHost = host; this.proxyPort = port; this.proxyType = type; this }
+
+        /** Credentials for the proxy's 407 challenge only; never sent to a target server. */
+        Builder proxyAuth(String user, String password) { this.proxyUser = user; this.proxyPassword = password; this }
+
+        /** Target hosts that bypass the proxy; '*' wildcards ('*.internal', 'localhost'). */
+        Builder nonProxyHosts(String... hosts) { this.nonProxyHosts = hosts as List<String>; this }
+
+        /** Connect directly, ignoring the JVM's proxy settings. */
+        Builder noProxy() { this.noProxy = true; this }
 
         /** Client-level response { } handlers (success / failure / when / exception); requests merge over them. */
         Builder response(@DelegatesTo(value = ResponseHandlers, strategy = Closure.DELEGATE_FIRST) Closure handlers) {
@@ -394,7 +421,14 @@ class GroovyHttpClient implements AutoCloseable {
                     http3Discovery             : http3Discovery,
                     errorBodyPreviewChars      : errorBodyPreviewChars,
                     compression                : compression,
-                    maxStreamItemBytes         : maxStreamItemBytes
+                    maxStreamItemBytes         : maxStreamItemBytes,
+                    proxyHost                  : proxyHost,
+                    proxyPort                  : proxyPort,
+                    proxyType                  : proxyType,
+                    proxyUser                  : proxyUser,
+                    proxyPassword              : proxyPassword,
+                    nonProxyHosts              : nonProxyHosts,
+                    noProxy                    : noProxy
             ])
             def client = new GroovyHttpClient(cfg, codecRegistry ?: codecBuilder?.build())
             if (defaultResponse != null) client.defaultResponse(defaultResponse)
@@ -486,7 +520,16 @@ class GroovyHttpClient implements AutoCloseable {
             log.warn("[GroovyHttpClient] HTTP/3 requested but this JDK ({}) has no HTTP/3 support (needs 26+); using HTTP/2", Runtime.version())
             jdkVersion = HttpClient.Version.HTTP_2
         }
+        if (config.proxyHost && Http3Support.fromJdk(jdkVersion) == HttpVersion.HTTP_3) {
+            // QUIC is UDP: an HTTP proxy cannot carry it (HTTP_3_URI_ONLY with a proxy is refused by SecurityConfig)
+            log.warn("[GroovyHttpClient] HTTP/3 requested with a proxy ({}:{}); HTTP/3 cannot go through an HTTP proxy, using HTTP/2",
+                    config.proxyHost, config.proxyPort)
+            jdkVersion = HttpClient.Version.HTTP_2
+        }
         this.effectiveHttpVersion = Http3Support.fromJdk(jdkVersion)
+        this.proxySelector = ProxySupport.selectorFor(config.noProxy, config.proxyHost, config.proxyPort, config.nonProxyHosts)
+        this.proxyAuthorization = config.proxyUser != null ?
+                ProxySupport.basicProxyAuthorization(config.proxyUser, config.proxyPassword) : null
 
         def b = HttpClient.newBuilder()
                 .executor(executor)
@@ -496,7 +539,9 @@ class GroovyHttpClient implements AutoCloseable {
                 // allowedHosts (SEC-3); the JDK client must never follow them itself.
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .cookieHandler(cookieManager)
-                .proxy(ProxySelector.getDefault())
+                .proxy(proxySelector)
+        // No java.net.Authenticator for proxyAuth: with one installed the JDK turns a target's 401 it declines into
+        // IOException("No credentials provided"). Proxy credentials are sent preemptively instead (sendFollowingRedirects).
 
         if (config.insecureAllowed) {
             this.httpClient = createInsecureClient(b, config)
@@ -1710,6 +1755,7 @@ class GroovyHttpClient implements AutoCloseable {
         // HTTP/2 and HTTP/3 fail a cancelled stream with their own cause-less IOException, so the body subscriber's
         // own failure (size limit, undecodable body) travels in a side channel and replaces it (2.0 surfaced a
         // retryable IOException there).
+        req = withProxyAuthorization(req)
         def failure = new java.util.concurrent.atomic.AtomicReference<RuntimeException>()
         def decodedAs = ctx?.decodeResponse ? new java.util.concurrent.atomic.AtomicReference<String>() : null
         long limit = ctx?.maxResponseBytes ?: maxResponseBytes
@@ -1725,8 +1771,15 @@ class GroovyHttpClient implements AutoCloseable {
             }
             RuntimeException own = failure.get()
             if (own != null) throw own
+            if (config.proxyHost && ProxySupport.isTunnel407(err)) {
+                throw new AuthenticationException(ProxySupport.tunnelRefusedMessage(proxyAuthorization != null), 407, null, err)
+            }
             throw (err instanceof CompletionException ? err : new CompletionException(err))
         }.thenCompose { HttpResponse<byte[]> resp ->
+            // The JDK returns the proxy's answer to CONNECT as the response: a 407 for an https target is a refused tunnel
+            if (resp.statusCode() == 407 && config.proxyHost && 'https'.equalsIgnoreCase(req.uri().scheme)) {
+                throw new AuthenticationException(ProxySupport.tunnelRefusedMessage(proxyAuthorization != null), 407)
+            }
             if (!config.allowRedirects || !REDIRECT_CODES.contains(resp.statusCode())) {
                 return CompletableFuture.completedFuture(resp)
             }
@@ -1749,6 +1802,19 @@ class GroovyHttpClient implements AutoCloseable {
             }
             return sendFollowingRedirects(redirectRequest(req, target, resp.statusCode(), ctx?.auth?.auth?.credentialHeader), hop + 1, ctx)
         } as CompletableFuture<HttpResponse<byte[]>>
+    }
+
+    /**
+     * proxyAuth (2.1): Basic Proxy-Authorization, preemptively, on requests the explicit proxy carries -- never on a
+     * request that bypasses it (nonProxyHosts), so proxy credentials cannot reach a target directly. Added here, below
+     * the redirect layer, so cross-origin credential stripping (which removes Proxy-Authorization) cannot drop it.
+     */
+    private HttpRequest withProxyAuthorization(HttpRequest req) {
+        if (proxyAuthorization == null || req.headers().firstValue('Proxy-Authorization').isPresent()) return req
+        List<Proxy> chosen = proxySelector.select(req.uri())
+        if (!chosen || chosen.get(0).type() != Proxy.Type.HTTP) return req
+        HttpRequest.newBuilder(req, { String n, String v -> true } as java.util.function.BiPredicate<String, String>)
+                .header('Proxy-Authorization', proxyAuthorization).build()
     }
 
     private void checkRedirectTarget(URI from, URI to) {

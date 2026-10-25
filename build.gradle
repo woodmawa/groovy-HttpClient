@@ -128,6 +128,8 @@ tasks.withType(Test).configureEach { Test t ->
         // FeatureCoverageSpec scans these for @Feature tags
         systemProperty 'feature.scan.unitDirs', sourceSets.test.output.classesDirs.files.join(File.pathSeparator)
         systemProperty 'feature.scan.integrationDirs', sourceSets.integrationTest.output.classesDirs.files.join(File.pathSeparator)
+        // proxy.auth specs: the JDK drops Basic proxy credentials from CONNECT unless this is cleared; users do the same
+        systemProperty 'jdk.http.auth.tunneling.disabledSchemes', ''
     }
 }
 
