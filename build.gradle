@@ -18,7 +18,7 @@ def buildJdk    = 27
 def bytecodeJdk = 25
 
 group = 'io.github.woodmawa'  // Or 'io.github.woodmawa' if using GitHub-based group
-version = '2.0.0'  // Groovy 6, Java 25 floor, HTTP/3, security behaviour changes (see docs/chapters/12-upgrading-2.0.adoc)
+version = '2.1.0'  // codecs, handlers, error detail, streaming, compression, auth, proxy, published test fixtures (2.0: Groovy 6, Java 25 floor, HTTP/3)
 
 // repositories are declared once, in settings.gradle
 
@@ -196,6 +196,9 @@ publishing {
     publications {
         mavenJava(MavenPublication) {
             from components.java
+            // Gradle capabilities have no POM form; Maven users take the fixtures by classifier (test-fixtures)
+            suppressPomMetadataWarningsFor('testFixturesApiElements')
+            suppressPomMetadataWarningsFor('testFixturesRuntimeElements')
 
             // Artifact coordinates
             groupId = project.group

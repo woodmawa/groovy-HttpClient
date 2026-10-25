@@ -137,25 +137,17 @@ class GroovyHttpClientCircuitBreakerIntegrationSpec extends Specification {
         /* FIX 1: Use SecurityConfig instead of the old multi-argument constructor.
            The current GroovyHttpClient  requires a SecurityConfig.
         */
+        // T-1 (2.1): a real refused connection drives the breaker. This spec used to swap the client's final
+        // httpClient field for a mock by reflection, which JDK 27 warns will be blocked.
+        def probe = new ServerSocket(0)
+        int closedPort = probe.localPort
+        probe.close()
         def config = new SecurityConfig(
-                baseUrl: "http://example.com",
+                baseUrl: "http://localhost:${closedPort}".toString(),
                 failureThreshold: 2, // Very low threshold for testing
                 resetTimeoutMs: 30000
         )
         def client = new GroovyHttpClient(config)
-
-        and: "A mock HttpClient to simulate network failures"
-        def mockServer = Mock(java.net.http.HttpClient)
-
-        // Use reflection to replace the private final httpClient [cite: 343]
-        def httpClientField = GroovyHttpClient.class.getDeclaredField("httpClient")
-        httpClientField.setAccessible(true)
-        httpClientField.set(client, mockServer)
-
-        // Make the mock always throw an IOException
-        mockServer.sendAsync(_, _) >> {
-            CompletableFuture.failedFuture(new IOException("Simulated network failure"))
-        }
 
         when: "We make calls to reach the threshold"
         def firstException = null
@@ -184,7 +176,7 @@ class GroovyHttpClientCircuitBreakerIntegrationSpec extends Specification {
             thirdException = unwrapCompletionException(e)
         }
 
-        then: "The first two failures should be the simulated network errors"
+        then: "The first two failures are the refused connections"
         firstException instanceof IOException
         secondException instanceof IOException
 
