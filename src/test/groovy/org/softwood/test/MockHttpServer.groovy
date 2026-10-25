@@ -370,6 +370,13 @@ class MockHttpServer {
             return
         }
 
+        if (check.responseBytes != null) {
+            check.responseHeaders.each { k, vals -> vals.each { v -> ex.responseHeaders.add(k, v.toString()) } }
+            ex.sendResponseHeaders(check.statusCode, check.responseBytes.length == 0 ? -1 : check.responseBytes.length)
+            if (check.responseBytes.length > 0) ex.responseBody.write(check.responseBytes)
+            ex.close()
+            return
+        }
         respond(ex, check.statusCode, check.responseBody, check.responseHeaders, check.responseCookies)
     }
 
@@ -439,6 +446,10 @@ class MockHttpServer {
         }
 
         RequestCheck withResponseBody(String body) { this.responseBody = body; this }
+
+        /** Binary response body, sent exactly as given (e.g. gzip). Overrides withResponseBody. */
+        byte[] responseBytes = null
+        RequestCheck withResponseBytes(byte[] bytes) { this.responseBytes = bytes; this }
 
         RequestCheck withResponseHeaders(Map headers) {
             headers?.each { k, v ->

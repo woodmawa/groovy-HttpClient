@@ -80,6 +80,11 @@ class SecurityConfig {
      * no body, because messages end up in logs (SEC-11). {@link #testing} uses 120. Range 0..4096.
      */
     final int errorBodyPreviewChars
+    /**
+     * Response compression (2.1, default off): send Accept-Encoding gzip, deflate and decode those encodings.
+     * maxResponseBytes then counts decoded bytes. Per request: compression(boolean).
+     */
+    final boolean compression
 
     // Protocol
     /** Preferred HTTP version (default HTTP_2). HTTP_3 needs JDK 26+ at runtime; otherwise the client falls back to HTTP_2. */
@@ -111,7 +116,7 @@ class SecurityConfig {
             'cookiePolicy', 'allowedHosts', 'enableLogging', 'enableMetrics', 'allowRedirects', 'maxRedirects',
             'failureThreshold', 'resetTimeoutMs', 'retryPolicy', 'enforceHostnameVerification', 'allowedTlsProtocols',
             'allowedCipherSuites', 'sslContext', 'trustStore', 'trustManagers', 'keyManagers',
-            'httpVersion', 'http3Discovery', 'errorBodyPreviewChars'
+            'httpVersion', 'http3Discovery', 'errorBodyPreviewChars', 'compression'
     ] as LinkedHashSet<String>).asImmutable()
 
     /**
@@ -145,6 +150,7 @@ class SecurityConfig {
         this.allowRedirects              = opt(a, 'allowRedirects', true) as boolean
         this.maxRedirects                = opt(a, 'maxRedirects', DEFAULT_MAX_REDIRECTS) as int
         this.errorBodyPreviewChars       = opt(a, 'errorBodyPreviewChars', 0) as int
+        this.compression                 = opt(a, 'compression', false) as boolean
         this.http3Discovery              = toEnum(Http3Discovery, opt(a, 'http3Discovery', null))
         this.httpVersion                 = toEnum(HttpVersion, opt(a, 'httpVersion',
                 http3Discovery != null ? HttpVersion.HTTP_3 : HttpVersion.HTTP_2))
@@ -322,6 +328,7 @@ class SecurityConfig {
                 allowRedirects             : allowRedirects,
                 maxRedirects               : maxRedirects,
                 errorBodyPreviewChars      : errorBodyPreviewChars,
+                compression                : compression,
                 httpVersion                : httpVersion,
                 http3Discovery             : http3Discovery,
                 failureThreshold           : failureThreshold,

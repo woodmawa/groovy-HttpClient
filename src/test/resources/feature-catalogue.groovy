@@ -76,9 +76,9 @@
     [id: 'response.error-detail', title: 'HttpResponseException: no body in message by default; headers, method, uri, contentType, bodyAs; errorBodyPreviewChars', status: 'implemented', version: '2.1', integration: true, protocols: ALL],
     [id: 'response.problem-details', title: 'RFC 9457 application/problem+json parsed as e.problem', status: 'implemented', version: '2.1', integration: true, protocols: ALL],
     [id: 'response.size-limit-exception', title: 'ResponseTooLargeException (limit, bytesRead) for the client-side maxResponseBytes limit', status: 'implemented', version: '2.1', integration: true, protocols: ALL],
-    [id: 'compression.gzip-response', title: 'Opt-in gzip / deflate response decompression',          status: 'planned', version: '2.1', integration: true,  protocols: ALL],
-    [id: 'compression.zip-bomb-guard', title: 'maxResponseBytes counts decompressed bytes',           status: 'planned', version: '2.1', integration: true,  protocols: ALL],
-    [id: 'compression.gzip-request', title: 'Optional gzip request bodies',                           status: 'planned', version: '2.1', integration: true,  protocols: ALL],
+    [id: 'compression.gzip-response', title: 'Opt-in gzip / deflate response decompression',          status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
+    [id: 'compression.zip-bomb-guard', title: 'maxResponseBytes counts decompressed bytes',           status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
+    [id: 'compression.gzip-request', title: 'Optional gzip request bodies',                           status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
 
     // ==== 2.2 (ideation #178) =================================================================================
     [id: 'auth.basic',           title: 'Basic auth interceptor',                                     status: 'planned', version: '2.2', integration: true,  protocols: ALL],

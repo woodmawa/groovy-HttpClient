@@ -9,6 +9,9 @@ import groovy.xml.XmlSlurper
 import org.softwood.http.codec.BuiltinCodecs
 import org.softwood.http.codec.CodecRegistry
 import org.softwood.http.codec.MediaType
+import org.softwood.http.compression.ContentDecoder
+import org.softwood.http.compression.DecodedResponse
+import org.softwood.http.compression.GzipRequestBody
 
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLParameters
@@ -251,6 +254,7 @@ class GroovyHttpClient implements AutoCloseable {
         private CodecRegistry codecRegistry
         private CodecRegistry.Builder codecBuilder
         private Integer errorBodyPreviewChars
+        private Boolean compression
         private Closure defaultResponse
 
         Builder(String baseUrl) { this.baseUrl = baseUrl }
@@ -275,6 +279,9 @@ class GroovyHttpClient implements AutoCloseable {
 
         /** Characters of the error body shown in HttpResponseException messages (default 0 = none; 0..4096). */
         Builder errorBodyPreviewChars(int chars) { this.errorBodyPreviewChars = chars; this }
+
+        /** Response compression (default off): send Accept-Encoding gzip, deflate and decode those bodies. */
+        Builder compression(boolean enabled) { this.compression = enabled; this }
 
         /** Client-level response { } handlers (success / failure / when / exception); requests merge over them. */
         Builder response(@DelegatesTo(value = ResponseHandlers, strategy = Closure.DELEGATE_FIRST) Closure handlers) {
@@ -338,7 +345,8 @@ class GroovyHttpClient implements AutoCloseable {
                     maxRedirects               : maxRedirects,
                     httpVersion                : httpVersion,
                     http3Discovery             : http3Discovery,
-                    errorBodyPreviewChars      : errorBodyPreviewChars
+                    errorBodyPreviewChars      : errorBodyPreviewChars,
+                    compression                : compression
             ])
             def client = new GroovyHttpClient(cfg, codecRegistry ?: codecBuilder?.build())
             if (defaultResponse != null) client.defaultResponse(defaultResponse)
@@ -533,6 +541,8 @@ class GroovyHttpClient implements AutoCloseable {
         private HttpRequest.BodyPublisher bodyPublisher = null
         private String bodyContentType = null
         private ResponseHandlers responseHandlers = null
+        private Boolean compressionOverride = null
+        private boolean gzipBodyRequested = false
 
         GroovyRequestBuilder(HttpRequest.Builder builder) { this.builder = builder }
 
@@ -587,6 +597,18 @@ class GroovyHttpClient implements AutoCloseable {
 
         /** Send 'Expect: 100-continue' for this request. */
         GroovyRequestBuilder expectContinue(boolean enable) { expectContinueOverride = enable; this }
+
+        /** Response compression for this request only; overrides the client setting (2.1). */
+        GroovyRequestBuilder compression(boolean enabled) { compressionOverride = enabled; this }
+
+        /**
+         * Send this request's body gzip-compressed with Content-Encoding: gzip (2.1). Never automatic: many servers
+         * refuse compressed requests. Works for every body (codecs, form, multipart); no effect without a body.
+         */
+        GroovyRequestBuilder gzipBody() { gzipBodyRequested = true; this }
+
+        Boolean getCompressionOrNull() { compressionOverride }
+        boolean isGzipBodyRequested() { gzipBodyRequested }
 
         /** Replace any value of this header set so far (default headers included). */
         void setHeader(String name, String value) {
@@ -734,6 +756,10 @@ class GroovyHttpClient implements AutoCloseable {
         final Charset charset
         /** The protocol version the exchange actually used (e.g. HTTP_3 when QUIC was negotiated). */
         final HttpVersion httpVersion
+        /** The Content-Encoding the server applied (e.g. 'gzip'), or null; set whether or not the body was decoded (2.1). */
+        final String contentEncoding
+        /** True when the client decoded the body (compression on); Content-Encoding and Content-Length are then dropped (2.1). */
+        final boolean decoded
 
         /** The client's codec registry; parsed / bodyAs / as use it (defaults when built outside a client). */
         final CodecRegistry codecs
@@ -743,6 +769,9 @@ class GroovyHttpClient implements AutoCloseable {
             this.httpVersion = Http3Support.fromJdk(response.version())
             this.bytes = response.body() ?: new byte[0]
             this.headers = response.headers().map()
+            this.decoded = response instanceof DecodedResponse
+            this.contentEncoding = decoded ? ((DecodedResponse) response).contentEncoding :
+                    headers.find { k, v -> k.equalsIgnoreCase('Content-Encoding') }?.value?.getAt(0)
             this.statusCode = response.statusCode()
             this.contentType = getHeader("Content-Type")
             this.charset = parseCharset(contentType) ?: Charset.forName("UTF-8")
@@ -1106,6 +1135,9 @@ class GroovyHttpClient implements AutoCloseable {
             }
         }
 
+        boolean decodeResponse = prepareCompression(wrapped)
+        pub = gzipIfRequested(wrapped, pub)
+
         def requestSupplier = { ->
             HttpRequest.Builder b = HttpRequest.newBuilder().uri(finalUri)
             // C-1: replay the per-request DSL settings (timeout, version, expectContinue, headers)
@@ -1132,6 +1164,7 @@ class GroovyHttpClient implements AutoCloseable {
 
         def effectiveRetry = wrapped.getRetryPolicyOrNull() ?: config.retryPolicy ?: RetryPolicy.none()
         def ctx = new RequestContext(method.toUpperCase(), finalUri, requestSupplier, effectiveRetry)
+        ctx.decodeResponse = decodeResponse
 
         def chain = buildInterceptorChain()
 
@@ -1186,7 +1219,7 @@ class GroovyHttpClient implements AutoCloseable {
         Closure<CompletableFuture<HttpClientResponse>> terminal = { RequestContext ctx ->
             HttpRequest req = ctx.requestSupplier.call()
             long started = System.nanoTime()
-            sendFollowingRedirects(req, 0)
+            sendFollowingRedirects(req, 0, ctx.decodeResponse)
                     .thenApply { HttpResponse<byte[]> resp ->
                         if (config.enableLogging) {
                             log.info("[GroovyHttpClient] {} {} -> {} in {} ms (attempt {}, {})", ctx.method, loggableUri(resp.uri()),
@@ -1222,6 +1255,24 @@ class GroovyHttpClient implements AutoCloseable {
             }
         }
         chain
+    }
+
+    /**
+     * Response compression for one request (2.1): on when the request says so, else when the client does. Advertises
+     * exactly what the client decodes. A caller who set Accept-Encoding gets the body as sent, undecoded.
+     */
+    private boolean prepareCompression(GroovyRequestBuilder w) {
+        Boolean own = w.getCompressionOrNull()
+        boolean on = own != null ? own.booleanValue() : config.compression
+        if (!on || w.hasHeader('Accept-Encoding')) return false
+        w.header('Accept-Encoding', ContentDecoder.ACCEPT_ENCODING)
+        true
+    }
+
+    private static HttpRequest.BodyPublisher gzipIfRequested(GroovyRequestBuilder w, HttpRequest.BodyPublisher pub) {
+        if (pub == null || !w.isGzipBodyRequested()) return pub
+        w.setHeader('Content-Encoding', 'gzip')
+        GzipRequestBody.wrap(pub)
     }
 
     private CompletableFuture<HttpClientResponse> attemptWithRetry(
@@ -1275,7 +1326,9 @@ class GroovyHttpClient implements AutoCloseable {
             // The JDK client wraps a BodySubscriber failure in IOException. Our own exceptions (e.g. the
             // 413 from BoundedBodySubscriber) must surface as themselves, not as a retryable I/O error.
             if (cause instanceof IOException && (cause.cause instanceof HttpResponseException ||
-                    cause.cause instanceof RedirectRejectedException)) { cause = cause.cause; continue }
+                    cause.cause instanceof RedirectRejectedException || cause.cause instanceof ContentDecodingException)) {
+                cause = cause.cause; continue
+            }
             break
         }
         cause
@@ -1324,14 +1377,19 @@ class GroovyHttpClient implements AutoCloseable {
     private static final Set<Integer> REDIRECT_CODES = [301, 302, 303, 307, 308] as Set<Integer>
     private static final Set<String> CREDENTIAL_HEADERS = ['authorization', 'proxy-authorization', 'cookie'] as Set<String>
 
-    private CompletableFuture<HttpResponse<byte[]>> sendFollowingRedirects(HttpRequest req, int hop) {
-        // HTTP/2 and HTTP/3 fail a cancelled stream with their own cause-less IOException, so the size-limit
-        // exception travels in a side channel and replaces it (2.0 surfaced a retryable IOException there).
-        def tooLarge = new java.util.concurrent.atomic.AtomicReference<ResponseTooLargeException>()
-        httpClient.sendAsync(req, boundedBodyHandler(req, tooLarge)).handle { HttpResponse<byte[]> r, Throwable err ->
-            if (err == null) return r
-            ResponseTooLargeException limit = tooLarge.get()
-            if (limit != null) throw limit
+    private CompletableFuture<HttpResponse<byte[]>> sendFollowingRedirects(HttpRequest req, int hop, boolean decode = false) {
+        // HTTP/2 and HTTP/3 fail a cancelled stream with their own cause-less IOException, so the body subscriber's
+        // own failure (size limit, undecodable body) travels in a side channel and replaces it (2.0 surfaced a
+        // retryable IOException there).
+        def failure = new java.util.concurrent.atomic.AtomicReference<RuntimeException>()
+        def decodedAs = decode ? new java.util.concurrent.atomic.AtomicReference<String>() : null
+        httpClient.sendAsync(req, boundedBodyHandler(req, failure, decodedAs)).handle { HttpResponse<byte[]> r, Throwable err ->
+            if (err == null) {
+                String enc = decodedAs?.get()
+                return enc != null ? (HttpResponse<byte[]>) new DecodedResponse(r, enc) : r
+            }
+            RuntimeException own = failure.get()
+            if (own != null) throw own
             throw (err instanceof CompletionException ? err : new CompletionException(err))
         }.thenCompose { HttpResponse<byte[]> resp ->
             if (!config.allowRedirects || !REDIRECT_CODES.contains(resp.statusCode())) {
@@ -1349,7 +1407,7 @@ class GroovyHttpClient implements AutoCloseable {
             if (config.enableLogging) {
                 log.info("[GroovyHttpClient] following {} redirect {} -> {}", resp.statusCode(), loggableUri(req.uri()), loggableUri(target))
             }
-            return sendFollowingRedirects(redirectRequest(req, target, resp.statusCode()), hop + 1)
+            return sendFollowingRedirects(redirectRequest(req, target, resp.statusCode()), hop + 1, decode)
         } as CompletableFuture<HttpResponse<byte[]>>
     }
 
@@ -1397,11 +1455,20 @@ class GroovyHttpClient implements AutoCloseable {
      * ========================================================================= */
 
     private HttpResponse.BodyHandler<byte[]> boundedBodyHandler(HttpRequest req,
-            java.util.concurrent.atomic.AtomicReference<ResponseTooLargeException> sink = null) {
+            java.util.concurrent.atomic.AtomicReference<RuntimeException> sink = null,
+            java.util.concurrent.atomic.AtomicReference<String> decodedAs = null) {
         long max = maxResponseBytes
         String method = req?.method()
         URI uri = req?.uri()
-        return { HttpResponse.ResponseInfo info -> new BoundedBodySubscriber(max, method, uri, sink) } as HttpResponse.BodyHandler<byte[]>
+        return { HttpResponse.ResponseInfo info ->
+            ContentDecoder decoder = null
+            if (decodedAs != null) {
+                String enc = info.headers().firstValue('Content-Encoding').orElse(null)
+                decoder = ContentDecoder.forEncoding(enc)
+                decodedAs.set(decoder != null ? enc : null)
+            }
+            new BoundedBodySubscriber(max, method, uri, sink, decoder)
+        } as HttpResponse.BodyHandler<byte[]>
     }
 
     @CompileStatic
@@ -1410,18 +1477,25 @@ class GroovyHttpClient implements AutoCloseable {
         private final CompletableFuture<byte[]> result = new CompletableFuture<byte[]>()
         private final ByteArrayOutputStream buffer = new ByteArrayOutputStream()
         private Flow.Subscription subscription
+        /** Bytes kept: decoded bytes when a decoder is set (the zip-bomb guard), else wire bytes. The limit applies here. */
         private long received = 0L
+        private long wireBytes = 0L
 
         private final String method
         private final URI uri
-        private final java.util.concurrent.atomic.AtomicReference<ResponseTooLargeException> sink
+        private final java.util.concurrent.atomic.AtomicReference<RuntimeException> sink
+        private final ContentDecoder decoder
+        private final ContentDecoder.Sink decodedSink
 
         BoundedBodySubscriber(long max, String method = null, URI uri = null,
-                              java.util.concurrent.atomic.AtomicReference<ResponseTooLargeException> sink = null) {
+                              java.util.concurrent.atomic.AtomicReference<RuntimeException> sink = null,
+                              ContentDecoder decoder = null) {
             this.max = max
             this.method = method
             this.uri = uri
             this.sink = sink
+            this.decoder = decoder
+            this.decodedSink = { byte[] b, int off, int len -> keep(b, off, len) } as ContentDecoder.Sink
         }
 
         @Override
@@ -1436,27 +1510,58 @@ class GroovyHttpClient implements AutoCloseable {
         @Override
         void onNext(List<ByteBuffer> items) {
             if (result.isDone()) return
-            for (ByteBuffer bb : items) {
-                int n = bb.remaining()
-                received += n
-                if (max != Long.MAX_VALUE && received > max) {
-                    ResponseTooLargeException limit = new ResponseTooLargeException(max, received, method, uri)
-                    if (sink != null) sink.set(limit)
-                    result.completeExceptionally(limit)
-                    subscription.cancel()
-                    return
+            try {
+                for (ByteBuffer bb : items) {
+                    if (decoder == null) {
+                        int n = bb.remaining()
+                        byte[] chunk = new byte[n]
+                        bb.get(chunk)
+                        keep(chunk, 0, n)
+                    } else {
+                        wireBytes += bb.remaining()
+                        if (max != Long.MAX_VALUE && wireBytes > max) throw new ResponseTooLargeException(max, wireBytes, method, uri)
+                        decoder.decode(bb, decodedSink)
+                    }
                 }
-                byte[] chunk = new byte[n]
-                bb.get(chunk)
-                buffer.write(chunk, 0, n)
+            } catch (RuntimeException e) {
+                fail(e)
             }
         }
 
-        @Override
-        void onError(Throwable t) { result.completeExceptionally(t) }
+        /** Count and keep body bytes; over the limit this throws before buffering them. */
+        void keep(byte[] b, int off, int len) {
+            received += len
+            if (max != Long.MAX_VALUE && received > max) throw new ResponseTooLargeException(max, received, method, uri)
+            buffer.write(b, off, len)
+        }
+
+        private void fail(RuntimeException e) {
+            if (sink != null) sink.set(e)
+            result.completeExceptionally(e)
+            decoder?.close()
+            subscription?.cancel()
+        }
 
         @Override
-        void onComplete() { result.complete(buffer.toByteArray()) }
+        void onError(Throwable t) {
+            decoder?.close()
+            result.completeExceptionally(t)
+        }
+
+        @Override
+        void onComplete() {
+            if (result.isDone()) return
+            if (decoder != null) {
+                try {
+                    decoder.finish(decodedSink)
+                } catch (RuntimeException e) {
+                    if (sink != null) sink.set(e)
+                    result.completeExceptionally(e)
+                    return
+                }
+            }
+            result.complete(buffer.toByteArray())
+        }
     }
 
     private static URI appendQueryParams(URI uri, Map<String, List<String>> params) {
@@ -1619,7 +1724,8 @@ class GroovyHttpClient implements AutoCloseable {
 
         wrapped.header("Content-Type", "multipart/form-data; boundary=${boundary}")
 
-        def pub = buildMultipartBody(parts, boundary)
+        def pub = gzipIfRequested(wrapped, buildMultipartBody(parts, boundary))
+        boolean decodeResponse = prepareCompression(wrapped)
 
         def reqSupplier = { ->
             HttpRequest.Builder b = HttpRequest.newBuilder().uri(uri)
@@ -1629,6 +1735,7 @@ class GroovyHttpClient implements AutoCloseable {
 
         def effectiveRetry = wrapped.getRetryPolicyOrNull() ?: config.retryPolicy ?: RetryPolicy.none()
         def ctx = new RequestContext("POST", uri, reqSupplier, effectiveRetry)
+        ctx.decodeResponse = decodeResponse
 
         def chain = buildInterceptorChain()
 
@@ -1766,6 +1873,8 @@ class GroovyHttpClient implements AutoCloseable {
         Closure<HttpRequest> requestSupplier
         RetryPolicy retryPolicy
         int attempt = 1
+        /** Decode a gzip / deflate response body (compression on and Accept-Encoding sent by the client). */
+        boolean decodeResponse = false
 
         // Optional helper if user writes interceptor { ctx -> ctx.proceed() }
         Closure<CompletableFuture<HttpClientResponse>> proceed

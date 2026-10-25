@@ -215,7 +215,7 @@ class FeatureServer {
                             "<greeting protocol=\"${protocol}\">hello</greeting>")
                 case '/gzip':
                 case '/deflate':
-                    return compressed(request, response, callback, path.substring(1))
+                    return compressed(request, response, callback, path.substring(1), q)
                 case '/sse':
                     return send(request, response, callback, 200, 'text/event-stream',
                             'event: greeting\ndata: one\n\ndata: two\n\nid: 3\ndata: three\n\n')
@@ -258,12 +258,21 @@ class FeatureServer {
                     query   : q,
                     headers : headers,
                     body    : new String(body, StandardCharsets.UTF_8),
+                    bodyBase64: Base64.encoder.encodeToString(body),
                     protocol: protocol]))
         }
 
-        private static boolean compressed(Request request, Response response, Callback callback, String kind) {
+        /** ?n= sends n bytes of 'x' instead of the text: a tiny encoded body that inflates hugely (zip-bomb specs). */
+        private static boolean compressed(Request request, Response response, Callback callback, String kind,
+                                          Map<String, List<String>> q) {
             String accept = request.headers.get('Accept-Encoding') ?: ''
-            byte[] plain = COMPRESSIBLE.getBytes(StandardCharsets.UTF_8)
+            byte[] plain
+            if (q.n) {
+                plain = new byte[q.n.first() as int]
+                Arrays.fill(plain, (byte) 'x')
+            } else {
+                plain = COMPRESSIBLE.getBytes(StandardCharsets.UTF_8)
+            }
             if (!accept.toLowerCase(Locale.ROOT).contains(kind)) {
                 return send(request, response, callback, 200, 'text/plain; charset=UTF-8', plain)
             }
