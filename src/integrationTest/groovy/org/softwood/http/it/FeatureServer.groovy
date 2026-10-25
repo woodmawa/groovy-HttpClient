@@ -46,7 +46,7 @@ import java.util.zip.GZIPOutputStream
  *
  * Endpoints (same on every connector):
  *   /echo                  any method; JSON {method, path, query, headers, body, protocol}; X-Echo-Method, X-Multi a/b
- *   /status/{code}         that status, body "body-for-{code}"
+ *   /status/{code}         that status, body "body-for-{code}"; ?type=&body= override content type and body
  *   /redirect/{n}?code=c   n hops (default 302) ending at /echo
  *   /slow?ms=n             sleeps n ms, then "slow"
  *   /bytes?n=n             n bytes of 'x' (application/octet-stream)
@@ -192,7 +192,9 @@ class FeatureServer {
                     return echo(request, response, callback, path, q, protocol)
                 case ~'/status/\\d{3}':
                     int code = path.substring('/status/'.length()) as int
-                    return send(request, response, callback, code, 'text/plain; charset=UTF-8', "body-for-${code}")
+                    String type = q.type?.first() ?: 'text/plain; charset=UTF-8'
+                    String body = q.body?.first() ?: "body-for-${code}".toString()
+                    return send(request, response, callback, code, type, body)
                 case ~'/redirect/\\d+':
                     int n = path.substring('/redirect/'.length()) as int
                     int code = (q.code?.first() ?: '302') as int

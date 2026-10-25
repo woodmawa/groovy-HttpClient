@@ -350,6 +350,7 @@ class MockHttpServer {
     // -------------------------
 
     private void handleRequest(HttpExchange ex, RequestCheck check) {
+        check.received << RecordedRequest.from(ex)
         def method = ex.requestMethod
         def requestHeaders = ex.requestHeaders
         def cookies = parseCookies(ex)
@@ -461,5 +462,51 @@ class MockHttpServer {
         RequestCheck withExpectedCookies(Map<String, String> cookies) { expectedCookies.putAll(cookies); this }
         RequestCheck withResponseCookies(Map<String, String> cookies) { responseCookies.putAll(cookies); this }
         RequestCheck withDelay(int ms) { this.delayMs = ms; this }
+
+        /** Every request this check served, oldest first (recorded before any matching). */
+        final List<RecordedRequest> received = Collections.synchronizedList(new ArrayList<RecordedRequest>())
+
+        RecordedRequest getLastRequest() { received ? received[-1] : null }
+    }
+
+    /** What the server actually received: the raw (still percent-encoded) query, headers and body bytes. */
+    static class RecordedRequest {
+        String method
+        URI uri
+        String rawQuery
+        Map<String, List<String>> headers
+        byte[] body
+
+        static RecordedRequest from(HttpExchange ex) {
+            new RecordedRequest(
+                    method: ex.requestMethod,
+                    uri: ex.requestURI,
+                    rawQuery: ex.requestURI.rawQuery,
+                    headers: ex.requestHeaders.collectEntries { k, v -> [(k.toLowerCase()): new ArrayList<String>(v)] } as Map<String, List<String>>,
+                    body: ex.requestBody.readAllBytes())
+        }
+
+        String header(String name) { headers[name.toLowerCase()]?.getAt(0) }
+
+        String getBodyText() { new String(body ?: new byte[0], StandardCharsets.UTF_8) }
+
+        /** Query decoded exactly once, the way a server framework would see it. */
+        Map<String, List<String>> getQuery() { decodePairs(rawQuery) }
+
+        /** application/x-www-form-urlencoded body decoded exactly once. */
+        Map<String, List<String>> getForm() { decodePairs(bodyText) }
+
+        private static Map<String, List<String>> decodePairs(String s) {
+            Map<String, List<String>> out = new LinkedHashMap<>()
+            if (!s) return out
+            s.split('&').each { String pair ->
+                if (!pair) return
+                int eq = pair.indexOf('=')
+                String k = URLDecoder.decode(eq < 0 ? pair : pair.substring(0, eq), StandardCharsets.UTF_8)
+                String v = eq < 0 ? '' : URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8)
+                out.computeIfAbsent(k) { new ArrayList<String>() } << v
+            }
+            out
+        }
     }
 }
