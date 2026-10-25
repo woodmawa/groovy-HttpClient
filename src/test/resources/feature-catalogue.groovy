@@ -69,7 +69,7 @@
     [id: 'codec.structured-suffix', title: '+json / +xml structured-suffix matching (problem+json, vnd.tmf+json)', status: 'implemented', version: '2.1', integration: true, protocols: ALL],
     [id: 'codec.typed-result',   title: 'Typed results: get(Customer)',                               status: 'implemented', version: '2.1', integration: false],
     [id: 'codec.jackson',        title: 'Optional Jackson codec via ServiceLoader',                   status: 'implemented', version: '2.1', integration: false],
-    [id: 'stream.download-path', title: 'Download to Path / OutputStream, maxResponseBytes enforced', status: 'planned', version: '2.1', integration: true,  protocols: ALL],
+    [id: 'stream.download-path', title: 'Download to Path / OutputStream, maxResponseBytes enforced', status: 'implemented', version: '2.1', integration: true,  protocols: ALL],
     [id: 'stream.upload',        title: 'Streaming upload from Path / InputStream / Publisher',       status: 'planned', version: '2.1', integration: true,  protocols: ALL],
     [id: 'stream.lines',         title: 'Line / SSE / NDJSON stream reader',                          status: 'planned', version: '2.1', integration: true,  protocols: ALL],
     [id: 'response.handlers',    title: 'response { success {}; failure {}; when(404) {}; exception {} }', status: 'implemented', version: '2.1', integration: true, protocols: ALL],
