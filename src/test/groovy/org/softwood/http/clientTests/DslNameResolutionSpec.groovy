@@ -59,6 +59,25 @@ class DslNameResolutionSpec extends Specification {
         stray.received.isEmpty()
     }
 
+    @groovy.transform.CompileStatic
+    static int staticallyCompiledCaller(GroovyHttpClient c) {
+        c.getSync('/q') {
+            query(a: '1')
+            header('X-Static', 'yes')
+        }.statusCode
+    }
+
+    @Feature('request.dsl-validation')
+    def "a @CompileStatic caller can use the request DSL (IllegalAccessError before 2.1)"() {
+        given:
+        def target = server.addRequestCheck('GET', '/q', 200)
+
+        expect:
+        staticallyCompiledCaller(client) == 200
+        target.lastRequest.query == [a: ['1']]
+        target.lastRequest.header('X-Static') == 'yes'
+    }
+
     @Feature('request.dsl-validation')
     def "real client properties still read normally"() {
         expect:

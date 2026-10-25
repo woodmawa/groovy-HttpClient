@@ -72,7 +72,7 @@
     [id: 'stream.download-path', title: 'Download to Path / OutputStream, maxResponseBytes enforced', status: 'planned', version: '2.1', integration: true,  protocols: ALL],
     [id: 'stream.upload',        title: 'Streaming upload from Path / InputStream / Publisher',       status: 'planned', version: '2.1', integration: true,  protocols: ALL],
     [id: 'stream.lines',         title: 'Line / SSE / NDJSON stream reader',                          status: 'planned', version: '2.1', integration: true,  protocols: ALL],
-    [id: 'response.handlers',    title: 'response { success {}; failure {}; when(404) {}; exception {} }', status: 'planned', version: '2.1', integration: true, protocols: ALL],
+    [id: 'response.handlers',    title: 'response { success {}; failure {}; when(404) {}; exception {} }', status: 'implemented', version: '2.1', integration: true, protocols: ALL],
     [id: 'response.error-detail', title: 'HttpResponseException: no body in message by default; headers, method, uri, contentType, bodyAs; errorBodyPreviewChars', status: 'implemented', version: '2.1', integration: true, protocols: ALL],
     [id: 'response.problem-details', title: 'RFC 9457 application/problem+json parsed as e.problem', status: 'implemented', version: '2.1', integration: true, protocols: ALL],
     [id: 'response.size-limit-exception', title: 'ResponseTooLargeException (limit, bytesRead) for the client-side maxResponseBytes limit', status: 'implemented', version: '2.1', integration: true, protocols: ALL],

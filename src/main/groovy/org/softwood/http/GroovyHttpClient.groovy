@@ -208,6 +208,15 @@ class GroovyHttpClient implements AutoCloseable {
     /** Encoders for request bodies and parsers for responses, by media type (2.1). Immutable, shared. */
     final CodecRegistry codecs
 
+    /** Client-level response { } handlers; each request's own block is merged over them (2.1). */
+    private volatile ResponseHandlers defaultResponseHandlers
+
+    /** Default response { } handlers for every request; a request's own handlers win per key. Null clears them. */
+    GroovyHttpClient defaultResponse(@DelegatesTo(value = ResponseHandlers, strategy = Closure.DELEGATE_FIRST) Closure handlers) {
+        defaultResponseHandlers = handlers == null ? null : ResponseHandlers.from(handlers)
+        this
+    }
+
     // Optional: manage executor lifecycle
     private final def executor
 
@@ -242,6 +251,7 @@ class GroovyHttpClient implements AutoCloseable {
         private CodecRegistry codecRegistry
         private CodecRegistry.Builder codecBuilder
         private Integer errorBodyPreviewChars
+        private Closure defaultResponse
 
         Builder(String baseUrl) { this.baseUrl = baseUrl }
 
@@ -265,6 +275,12 @@ class GroovyHttpClient implements AutoCloseable {
 
         /** Characters of the error body shown in HttpResponseException messages (default 0 = none; 0..4096). */
         Builder errorBodyPreviewChars(int chars) { this.errorBodyPreviewChars = chars; this }
+
+        /** Client-level response { } handlers (success / failure / when / exception); requests merge over them. */
+        Builder response(@DelegatesTo(value = ResponseHandlers, strategy = Closure.DELEGATE_FIRST) Closure handlers) {
+            this.defaultResponse = handlers
+            this
+        }
 
         Builder connectTimeout(Duration timeout) { this.connectTimeout = timeout; this }
         Builder requestTimeout(Duration timeout) { this.requestTimeout = timeout; this }
@@ -324,7 +340,9 @@ class GroovyHttpClient implements AutoCloseable {
                     http3Discovery             : http3Discovery,
                     errorBodyPreviewChars      : errorBodyPreviewChars
             ])
-            new GroovyHttpClient(cfg, codecRegistry ?: codecBuilder?.build())
+            def client = new GroovyHttpClient(cfg, codecRegistry ?: codecBuilder?.build())
+            if (defaultResponse != null) client.defaultResponse(defaultResponse)
+            client
         }
     }
 
@@ -496,7 +514,11 @@ class GroovyHttpClient implements AutoCloseable {
      * Request DSL wrapper
      * ========================================================================= */
 
-    private class GroovyRequestBuilder {
+    /**
+     * The request DSL delegate. Public since 2.1: as a private class, @CompileStatic callers of any verb's
+     * closure failed at runtime with IllegalAccessError.
+     */
+    class GroovyRequestBuilder {
         private final HttpRequest.Builder builder
         private final Map<String, List<String>> headers = new ConcurrentHashMap<String, List<String>>()
         private final Map<String, List<String>> queryParams = new ConcurrentHashMap<String, List<String>>()
@@ -510,6 +532,7 @@ class GroovyHttpClient implements AutoCloseable {
 
         private HttpRequest.BodyPublisher bodyPublisher = null
         private String bodyContentType = null
+        private ResponseHandlers responseHandlers = null
 
         GroovyRequestBuilder(HttpRequest.Builder builder) { this.builder = builder }
 
@@ -616,6 +639,17 @@ class GroovyHttpClient implements AutoCloseable {
             bodyPublisher = HttpRequest.BodyPublishers.ofByteArray(bytes)
             bodyContentType = ct
         }
+
+        /**
+         * Turn the outcome into a value instead of an exception (2.1):
+         * <pre>response { success { r -> r as Order }; when(404) { null }; failure { r -> ... }; exception { t -> ... } }</pre>
+         * See {@link ResponseHandlers} for precedence. Retries and the circuit breaker run first, unchanged.
+         */
+        void response(@DelegatesTo(value = ResponseHandlers, strategy = Closure.DELEGATE_FIRST) Closure handlers) {
+            responseHandlers = ResponseHandlers.from(handlers)
+        }
+
+        ResponseHandlers getResponseHandlersOrNull() { responseHandlers }
 
         private String defaultContentType(Object obj) {
             if (obj instanceof byte[]) return 'application/octet-stream'
@@ -806,6 +840,30 @@ class GroovyHttpClient implements AutoCloseable {
         /** The body as an instance of {@code type} (Jackson when present, else Groovy coercion). */
         def <T> T bodyAs(Class<T> type) { (T) codecs.parse(bytes, mediaType, type) }
 
+        private transient volatile HttpResponseException raised
+
+        @groovy.transform.PackageScope
+        void attachException(HttpResponseException e) { raised = e }
+
+        /**
+         * The HttpResponseException the client raises for this response (status >= 400), with method and URI when
+         * the client raised it; null below 400. For {@code failure { r -> throw r.toException() }}.
+         */
+        HttpResponseException toException() {
+            raised ?: (statusCode >= 400 ? new HttpResponseException(this, null, null, 0) : null)
+        }
+
+        /** RFC 9457 problem details when the Content-Type is application/problem+json and it parses; else null. */
+        ProblemDetail getProblem() {
+            if (mediaType?.essence != 'application/problem+json') return null
+            try {
+                def p = parsed
+                return p instanceof Map ? ProblemDetail.from((Map) p) : null
+            } catch (RuntimeException ignored) {
+                return null
+            }
+        }
+
         /** {@code response as Customer} = {@link #bodyAs}; the response itself for its own types. */
         Object asType(Class type) {
             if (type == null || type.isInstance(this)) return this
@@ -935,58 +993,58 @@ class GroovyHttpClient implements AutoCloseable {
         }
     }
 
-    HttpClientResponse getSync(String path, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        awaitResult(get(path, cfg), timeout)
+    HttpClientResponse getSync(String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        responseOrFail(awaitResult(get(path, cfg), timeout))
     }
-    HttpClientResponse postSync(String path, String body, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        awaitResult(post(path, body, cfg), timeout)
+    HttpClientResponse postSync(String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        responseOrFail(awaitResult(post(path, body, cfg), timeout))
     }
-    HttpClientResponse putSync(String path, String body, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        awaitResult(put(path, body, cfg), timeout)
+    HttpClientResponse putSync(String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        responseOrFail(awaitResult(put(path, body, cfg), timeout))
     }
-    HttpClientResponse patchSync(String path, String body, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        awaitResult(patch(path, body, cfg), timeout)
+    HttpClientResponse patchSync(String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        responseOrFail(awaitResult(patch(path, body, cfg), timeout))
     }
-    HttpClientResponse deleteSync(String path, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        awaitResult(delete(path, cfg), timeout)
+    HttpClientResponse deleteSync(String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        responseOrFail(awaitResult(delete(path, cfg), timeout))
     }
-    HttpClientResponse headSync(String path, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        awaitResult(head(path, cfg), timeout)
+    HttpClientResponse headSync(String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        responseOrFail(awaitResult(head(path, cfg), timeout))
     }
-    HttpClientResponse optionsSync(String path, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
-        awaitResult(options(path, cfg), timeout)
+    HttpClientResponse optionsSync(String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+        responseOrFail(awaitResult(options(path, cfg), timeout))
     }
 
     // Typed results (2.1): the body mapped to type by the codec registry. A >= 400 still raises.
-    def <T> CompletableFuture<T> get(Class<T> type, String path, Closure cfg = null) {
-        get(path, cfg).thenApply { HttpClientResponse r -> r.bodyAs(type) }
+    def <T> CompletableFuture<T> get(Class<T> type, String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null) {
+        get(path, cfg).thenApply { Object v -> typedResult(v, type) }
     }
-    def <T> CompletableFuture<T> post(Class<T> type, String path, String body, Closure cfg = null) {
-        post(path, body, cfg).thenApply { HttpClientResponse r -> r.bodyAs(type) }
+    def <T> CompletableFuture<T> post(Class<T> type, String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null) {
+        post(path, body, cfg).thenApply { Object v -> typedResult(v, type) }
     }
-    def <T> CompletableFuture<T> put(Class<T> type, String path, String body, Closure cfg = null) {
-        put(path, body, cfg).thenApply { HttpClientResponse r -> r.bodyAs(type) }
+    def <T> CompletableFuture<T> put(Class<T> type, String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null) {
+        put(path, body, cfg).thenApply { Object v -> typedResult(v, type) }
     }
-    def <T> CompletableFuture<T> patch(Class<T> type, String path, String body, Closure cfg = null) {
-        patch(path, body, cfg).thenApply { HttpClientResponse r -> r.bodyAs(type) }
+    def <T> CompletableFuture<T> patch(Class<T> type, String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null) {
+        patch(path, body, cfg).thenApply { Object v -> typedResult(v, type) }
     }
-    def <T> CompletableFuture<T> delete(Class<T> type, String path, Closure cfg = null) {
-        delete(path, cfg).thenApply { HttpClientResponse r -> r.bodyAs(type) }
+    def <T> CompletableFuture<T> delete(Class<T> type, String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null) {
+        delete(path, cfg).thenApply { Object v -> typedResult(v, type) }
     }
 
-    def <T> T getSync(Class<T> type, String path, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+    def <T> T getSync(Class<T> type, String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
         awaitResult(get(type, path, cfg), timeout)
     }
-    def <T> T postSync(Class<T> type, String path, String body, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+    def <T> T postSync(Class<T> type, String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
         awaitResult(post(type, path, body, cfg), timeout)
     }
-    def <T> T putSync(Class<T> type, String path, String body, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+    def <T> T putSync(Class<T> type, String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
         awaitResult(put(type, path, body, cfg), timeout)
     }
-    def <T> T patchSync(Class<T> type, String path, String body, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+    def <T> T patchSync(Class<T> type, String path, String body, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
         awaitResult(patch(type, path, body, cfg), timeout)
     }
-    def <T> T deleteSync(Class<T> type, String path, Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
+    def <T> T deleteSync(Class<T> type, String path, @DelegatesTo(strategy = Closure.DELEGATE_FIRST, value = GroovyRequestBuilder) Closure cfg = null, Duration timeout = DEFAULT_SYNC_TIMEOUT) {
         awaitResult(delete(type, path, cfg), timeout)
     }
 
@@ -1078,9 +1136,50 @@ class GroovyHttpClient implements AutoCloseable {
         def chain = buildInterceptorChain()
 
         // Circuit breaker gates the overall operation
-        return executeWithCircuitBreaker {
+        def outcome = executeWithCircuitBreaker {
             attemptWithRetry(ctx, chain).thenApply { HttpClientResponse r -> raiseForStatus(r, ctx) }
         }
+        ResponseHandlers own = wrapped.getResponseHandlersOrNull()
+        ResponseHandlers handlers = own != null ? own.mergedOver(defaultResponseHandlers) : defaultResponseHandlers
+        return (handlers == null || handlers.empty) ? outcome : applyResponseHandlers(outcome, handlers)
+    }
+
+    /**
+     * Runs response { } handlers on the final outcome (after retries and the circuit breaker). A status >= 400 arrives
+     * here as HttpResponseException carrying its response; with no handler for its status it is raised as before.
+     * exception { } receives every other failure. A handler's return value completes the future; a throw fails it.
+     */
+    private CompletableFuture<Object> applyResponseHandlers(CompletableFuture<HttpClientResponse> outcome, ResponseHandlers h) {
+        outcome.handle { HttpClientResponse r, Throwable t ->
+            if (t == null) {
+                Closure c = h.select(r.statusCode)
+                return c == null ? r : ResponseHandlers.call(c, r)
+            }
+            Throwable cause = unwrapCompletion(t)
+            if (cause instanceof HttpResponseException && ((HttpResponseException) cause).response != null) {
+                HttpResponseException hre = (HttpResponseException) cause
+                Closure c = h.select(hre.statusCode)
+                if (c != null) return ResponseHandlers.call(c, hre.response)
+                throw cause
+            }
+            if (h.exceptionHandler != null) return ResponseHandlers.call(h.exceptionHandler, cause)
+            throw cause
+        } as CompletableFuture<Object>
+    }
+
+    /** A typed verb's result: the handler's value when it is already a T (or null), else the response body as T. */
+    private static Object typedResult(Object value, Class<?> type) {
+        if (value == null || type.isInstance(value)) return value
+        if (value instanceof HttpClientResponse) return ((HttpClientResponse) value).bodyAs(type)
+        throw new ClassCastException("A response handler returned ${value.getClass().name}; the call asked for ${type.name}")
+    }
+
+    /** Untyped sync verbs return HttpClientResponse (2.0 signatures); a handler value needs the typed verb. */
+    private static HttpClientResponse responseOrFail(Object value) {
+        if (value == null || value instanceof HttpClientResponse) return (HttpClientResponse) value
+        String n = value.getClass().simpleName
+        throw new IllegalStateException("A response handler returned ${value.getClass().name}: call the typed verb, e.g. getSync(${n}, path) " +
+                "or getSync(Object, path), to receive handler values")
     }
 
     private Closure<CompletableFuture<HttpClientResponse>> buildInterceptorChain() {
@@ -1838,7 +1937,14 @@ class GroovyHttpClient implements AutoCloseable {
 
         HttpResponseException(HttpClientResponse r, String method, URI uri, int previewChars = 0) {
             this(r.statusCode, method, uri, r.headers, r.contentType, r.bytes, r.body, r.codecs, previewChars, null)
+            this.response = r
+            r.attachException(this)
         }
+
+        private transient HttpClientResponse response
+
+        /** The response this was raised for (null for client-side limits and after deserialisation). */
+        HttpClientResponse getResponse() { response }
 
         protected HttpResponseException(int statusCode, String method, URI uri, Map<String, List<String>> headers,
                                         String contentTypeHeader, byte[] bytes, String body, CodecRegistry codecs,
