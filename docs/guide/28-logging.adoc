@@ -1,0 +1,38 @@
+[[logging]]
+== Logging
+
+The library logs through SLF4J and ships no logging backend; add the binding your application uses (`logback-classic`, `log4j-slf4j2-impl`...).
+
+Request logging is off by default. Turn it on per client:
+
+[source,groovy]
+----
+def client = GroovyHttpClient.builder(url).enableLogging(true).build()
+----
+
+At `INFO`, logger `org.softwood.http.GroovyHttpClient`, you then get one line per completed attempt, retry and redirect:
+
+----
+[GroovyHttpClient] GET https://api.example.com/orders -> 200 in 84 ms (attempt 1, HTTP_2)
+[GroovyHttpClient] retrying GET https://api.example.com/orders in 412 ms (attempt 2 of 3) after status 503
+[GroovyHttpClient] following 303 redirect https://api.example.com/orders -> https://api.example.com/orders/42
+----
+
+These lines are credential-safe: URIs are logged without user info or query string, and headers and bodies are never logged.
+
+Whether or not request logging is on, the client logs a `WARN` when:
+
+* certificate verification is disabled (`trustAll()` / `insecureAllowed`);
+* HTTP/3 was requested but is unavailable (old JDK, or a proxy), so HTTP/2 is used;
+* the JVM's proxy settings select a SOCKS proxy, which the JDK client ignores;
+* the circuit breaker rejects a request.
+
+.logback.xml
+[source,xml]
+----
+<logger name="org.softwood.http" level="INFO"/>
+----
+
+For counts and latencies rather than individual lines, use the client's metrics (<<metrics>>); for more detail per request -- headers, timings, payload sizes -- add an interceptor (<<interceptors>>) and log what you need, taking care not to log credentials.
+
+To log circuit breaker transitions, register a listener: `client.onCircuitStateChange { from, to -> log.warn("circuit ${from} -> ${to}") }` (<<circuit-events>>).

@@ -1,0 +1,77 @@
+[[response-configuration]]
+== Response Configuration
+
+[[response-handlers]]
+=== Status handlers
+
+[source,groovy]
+----
+Order order = client.getSync(Order, '/orders/42') {
+    response {
+        success   { HttpClientResponse r -> r.bodyAs(Order) }    // status below 400
+        when(404) { r -> null }
+        when(409, 422) { r -> throw new ConflictException(r.problem) }
+        when(500..599) { r -> cachedOrder() }
+        failure   { r -> throw r.toException() }                 // any other status 400+
+    }
+}
+----
+
+The most specific handler wins: `when(int)`, then `when(a, b...)` or `when([list])`, then `when(range)`, then `success` or `failure`. A status no handler matches behaves as without handlers: returned below 400, raised at 400 and above.
+
+Handlers run once, on the final outcome, after retries and the circuit breaker. A handler's return value is the call's result; a handler that throws fails the call with that exception.
+
+*Getting the value.* The untyped verbs return `HttpClientResponse`. To receive what a handler returns, use a typed verb: `getSync(Order, path)` checks the value is an `Order`, and `getSync(Object, path)` accepts anything. If a handler returns the response itself, a typed verb converts it with `bodyAs`.
+
+*Client-wide handlers.* Set them on the builder with `response { }` or later with `client.defaultResponse { }`. A request's own `response { }` is merged over them, key by key.
+
+[[exception-handlers]]
+=== Exception handler
+
+[source,groovy]
+----
+response {
+    exception { Throwable t -> log.warn("orders unavailable: ${t.class.simpleName}"); cachedOrders() }
+}
+----
+
+`exception` receives the real cause of a failure that is not a status code -- `ConnectException`, `HttpTimeoutException`, `CircuitOpenException`, `ResponseTooLargeException`, `RedirectRejectedException` -- never a `CompletionException` wrapper.
+
+[[parsers]]
+=== Parsers and typed results
+
+[cols="2,4"]
+|===
+|`r.parsed` |Parsed by `Content-Type` with the client's codecs
+|`r.json`, `r.xml` |JSON (Map/List) and XML (GPathResult)
+|`r.bodyAs(Type)` / `r as Type` |Mapped onto your class
+|`getSync(Type, path)` |A typed verb
+|===
+
+Add parsers for your own media types with `codecs { parser ... }` (<<codecs-config>>).
+
+[[response-headers]]
+=== Headers
+
+[cols="2,4"]
+|===
+|`r.getHeader(name)` |First value, case-insensitive
+|`r.headers` |All headers, `Map<String, List<String>>`
+|`r.contentType`, `r.charset` |From `Content-Type`
+|`r.httpVersion` |The protocol actually used
+|===
+
+[[decoded-content]]
+=== Decoded content
+
+With compression on, a gzip or deflate body is decoded before you see it. `r.decoded` is then `true`, `r.contentEncoding` names what the server applied, and the `Content-Encoding` and `Content-Length` headers are removed because they no longer describe the body. See <<compression>>.
+
+[[size-limits]]
+=== Size limits
+
+A body larger than `maxResponseBytes` stops with `ResponseTooLargeException` (status 413, with `limit` and `bytesRead`). Raise the limit for one request with `maxResponseBytes n` in its closure, or stream the body to a file.
+
+[[stream-consumers]]
+=== Stream consumers
+
+`lines`, `sse` and `ndjson` deliver the body as it arrives instead of returning it; `downloadTo` writes it to a file or stream. See <<streaming>>.

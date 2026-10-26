@@ -1,0 +1,123 @@
+[[cookies]]
+== Cookies
+
+Most APIs authenticate with tokens and never set a cookie. Cookies matter when you talk to services built for browsers: session-based logins, load balancers that pin you to a server with a cookie, CSRF protection, and web pages you automate. This chapter covers how the client handles them and how to take control when you need to.
+
+=== How the client handles cookies
+
+Each client has its own cookie store (a `java.net.CookieManager`). It works like a browser's:
+
+* A `Set-Cookie` header in a response stores the cookie, subject to the client's *cookie policy*.
+* Later requests send back every stored cookie whose domain, path and `Secure` flag match the request, in a `Cookie` header.
+* Cookies expire as their `Max-Age` or `Expires` says; session cookies (neither attribute) last as long as the client.
+* The store is shared by all requests on that client and is thread-safe. It is not shared between clients, and it is not saved anywhere: a new client starts empty.
+
+[source,groovy]
+----
+def client = new GroovyHttpClient('https://httpbin.org')
+
+client.getSync('/cookies/set?flavour=oat')      // the server sets a cookie (and redirects)
+def r = client.getSync('/cookies')              // the client sends it back
+assert r.json.cookies.flavour == 'oat'
+----
+
+=== A session login
+
+The typical reason to care: an application that logs you in with a form and then recognises you by a session cookie.
+
+[source,groovy]
+----
+def app = GroovyHttpClient.builder('https://legacy.example.com').build()
+
+// 1. log in: the response sets JSESSIONID (or similar); the client stores it
+app.postSync('/login', null) { form(username: user, password: password) }
+
+// 2. every later request carries the session cookie automatically
+def orders = app.getSync('/api/orders').json
+
+// 3. log out, or simply discard the client
+app.postSync('/logout', null)
+app.clearCookies()
+----
+
+Use one client per logged-in identity: two users sharing a client would share a session.
+
+If the application uses a CSRF token in a cookie (often `XSRF-TOKEN`) and expects it echoed in a header, read it from the store:
+
+[source,groovy]
+----
+String csrf = app.getCookie('XSRF-TOKEN')?.value
+app.postSync('/api/orders', null) {
+    header 'X-XSRF-TOKEN', csrf
+    json(order)
+}
+----
+
+=== Setting and reading cookies yourself
+
+[source,groovy]
+----
+client.addCookie('session', 'abc123')            // stored, sent with later requests
+client.addCookie('pref', 'dark', '/settings')    // only for paths under /settings
+client.addCookie(new HttpCookie('lang', 'en'))   // full control: domain, max age, secure...
+client.getCookie('session')?.value               // java.net.HttpCookie
+client.cookies                                   // List<HttpCookie>
+client.removeCookie('pref')
+client.clearCookies()
+----
+
+For a cookie on one request only, set it in the request closure; it is not stored:
+
+[source,groovy]
+----
+client.getSync('/cookies') {
+    cookie 'trace', 't-1'
+    cookies(ab: 'variant-b', region: 'eu')
+}
+----
+
+Which to use:
+
+[cols="2,3"]
+|===
+|The server sets it and expects it back |Nothing: automatic
+|You obtained a session value elsewhere (an SSO hand-off, a stored session) |`addCookie`
+|A value that varies per request (A/B variant, trace id) |`cookie(...)` in the request
+|Starting a fresh session |`clearCookies()`, or a new client
+|===
+
+=== Cookie policy
+
+The policy decides which `Set-Cookie` headers are stored:
+
+[cols="2,4"]
+|===
+|`CookiePolicy.ACCEPT_ORIGINAL_SERVER` |The default. Accept a cookie only for the host that sent it. Right for nearly everything.
+|`CookiePolicy.ACCEPT_ALL` |Accept every cookie, including those for other domains. Used by the `testing()` profile, where local servers make domain checks awkward.
+|`CookiePolicy.ACCEPT_NONE` |Store nothing. For stateless API clients where a stray cookie (from a load balancer, say) must not influence later requests.
+|===
+
+[source,groovy]
+----
+GroovyHttpClient.builder(url).cookiePolicy(CookiePolicy.ACCEPT_NONE).build()
+client.cookiePolicy = CookiePolicy.ACCEPT_ALL          // or change it later
+----
+
+=== Cookies and security
+
+* *Validation.* Names and values you add are checked against RFC 6265: a value containing `;`, `,`, whitespace, quotes, a backslash or control characters is refused, so data from a user cannot smuggle extra cookies. Encode such values (URL or Base64) first.
+* *Redirects.* When a redirect leads to another origin, the `Cookie` header is removed along with credentials.
+* *Secure cookies.* A cookie marked `Secure` is only sent over HTTPS.
+* *Logging.* Cookie headers are never logged.
+
+=== Testing code that uses cookies
+
+`MockHttpServer` can set cookies and insist on receiving them:
+
+[source,groovy]
+----
+server.addRequestCheck('POST', '/login', 200).withResponseCookies([JSESSIONID: 's-1'])
+server.addRequestCheck('GET', '/api/orders', 200)
+        .withExpectedCookies([JSESSIONID: 's-1'])          // answers 400 without it
+        .withResponseBody('[]')
+----

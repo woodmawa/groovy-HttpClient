@@ -1,0 +1,200 @@
+[[quick-start]]
+== Quick Start
+
+This chapter takes you from nothing to a working, tested client in about fifteen minutes. Follow the steps in order; each one builds on the last and tells you what you should see.
+
+=== Step 1: Check your tools
+
+[source,shell]
+----
+java -version      # 25 or later (26+ if you want HTTP/3)
+groovy -version    # 6.0 or later -- only needed for the script route in step 2
+----
+
+Any IDE with Groovy support works; IntelliJ IDEA gives code completion inside the request closures (see <<dsl>>).
+
+=== Step 2: Get the library
+
+Pick one route.
+
+*Route A -- a Groovy script (fastest).* Create `first.groovy`; the `@Grab` line downloads the library the first time you run it:
+
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+@Grab('org.slf4j:slf4j-simple:2.0.20')
+import org.softwood.http.GroovyHttpClient
+----
+
+*Route B -- a Gradle project.* In `build.gradle`:
+
+[source,groovy,subs="attributes+"]
+----
+plugins {
+    id 'groovy'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.apache.groovy:groovy:6.0.0'
+    implementation '{project-group}:{project-artifact}:{project-version}'
+    runtimeOnly 'ch.qos.logback:logback-classic:1.6.5'        // any SLF4J 2.x binding
+
+    testImplementation testFixtures('{project-group}:{project-artifact}:{project-version}')
+    testImplementation 'org.spockframework:spock-core:2.5-groovy-6.0'
+}
+
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(25) }
+}
+----
+
+*Route C -- Maven.*
+
+[source,xml,subs="attributes+"]
+----
+<dependency>
+    <groupId>{project-group}</groupId>
+    <artifactId>{project-artifact}</artifactId>
+    <version>{project-version}</version>
+</dependency>
+----
+
+The library declares only `slf4j-api`; without a binding you get a one-line SLF4J warning and no log output, which is harmless.
+
+=== Step 3: Make your first request
+
+Add to your script (or a `main` method):
+
+[source,groovy]
+----
+def client = new GroovyHttpClient('https://httpbin.org')
+
+def r = client.getSync('/get')
+println r.statusCode          // 200
+println r.json.url            // https://httpbin.org/get
+println r.httpVersion         // HTTP_2
+----
+
+Run it (`groovy first.groovy`). You should see `200`, the URL and `HTTP_2`.
+
+What happened: the client was created once for a *base URL*; `getSync` sent `GET /get`, waited for the answer and returned an `HttpClientResponse`; `r.json` parsed the JSON body into maps and lists. Certificates were verified and the response size was bounded, without you configuring anything.
+
+=== Step 4: Add query parameters and headers
+
+[source,groovy]
+----
+def r = client.getSync('/get') {
+    query(lang: 'groovy', page: 1)
+    header 'Accept', 'application/json'
+}
+println r.json.args           // [lang:groovy, page:1]
+----
+
+The closure after the path is the *request DSL*: you describe the request, the client builds and sends it. Everything you can configure on a request goes here. <<dsl>> explains how it works.
+
+=== Step 5: Read JSON into your own class
+
+[source,groovy]
+----
+class Post { Integer userId; Integer id; String title; String body }
+
+def api = new GroovyHttpClient('https://jsonplaceholder.typicode.com')
+Post post = api.getSync(Post, '/posts/1')
+println post.title
+----
+
+Passing a class as the first argument asks for a *typed result*.
+
+=== Step 6: Handle an error
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient.HttpResponseException
+
+try {
+    client.getSync('/status/404')
+} catch (HttpResponseException e) {
+    println "${e.statusCode}: ${e.message}"
+}
+----
+
+Any status of 400 or more raises `HttpResponseException`, carrying the status, headers and body.
+
+=== Step 7: Send data
+
+[source,groovy]
+----
+def created = client.postSync('/post', null) {
+    json([name: 'Alice', role: 'admin'])
+}
+println created.json.json     // httpbin echoes what it received: [name:Alice, role:admin]
+----
+
+`post`, `put` and `patch` take an optional body string as their second argument; passing `null` and building the body in the closure is the usual style.
+
+=== Step 8: Go asynchronous
+
+Drop `Sync` from the method name and you get a `CompletableFuture` immediately:
+
+[source,groovy]
+----
+def pending = (1..5).collect { client.get('/delay/1') }      // five requests in flight
+println pending*.join()*.statusCode                         // after about one second, not five
+----
+
+=== Step 9: Configure the client for real use
+
+The constructor's defaults are safe; for an application you will usually want explicit timeouts and retries. Use the builder:
+
+[source,groovy]
+----
+import java.time.Duration
+
+def client = GroovyHttpClient.builder('https://api.example.com')
+        .connectTimeout(Duration.ofSeconds(5))
+        .requestTimeout(Duration.ofSeconds(15))
+        .retryPolicy(new GroovyHttpClient.RetryPolicy.Config().tap {
+            maxAttempts 3
+            backoffExponential(200, 2_000, true)
+            onIoExceptions(true); onTimeouts(true); on5xx(true)
+        }.build())
+        .auth { bearer System.getenv('API_TOKEN') }
+        .build()
+----
+
+Create it once (at application start, or as a singleton bean) and share it.
+
+=== Step 10: Test it without the network
+
+With the test fixtures on the test classpath (step 2, route B), a Spock specification runs your code against a real local server:
+
+[source,groovy]
+----
+import org.softwood.http.HttpClientTestTrait
+import spock.lang.Specification
+
+class FirstSpec extends Specification implements HttpClientTestTrait {
+    def "reads a user"() {
+        given:
+        testServer.when('/users/1').respondWithJson([id: 1, name: 'Alice'])
+
+        expect:
+        createTestClient().getSync('/users/1').json.name == 'Alice'
+    }
+}
+----
+
+=== Before you go to production
+
+* [ ] One client per base URL, created once and closed at shutdown.
+* [ ] Timeouts chosen for the service you call (step 9).
+* [ ] A retry policy if the service is occasionally flaky -- and only for idempotent requests.
+* [ ] Credentials from configuration or a secrets store, never in code.
+* [ ] A trust store if the service uses a private CA (<<security-basics>>); never `trustAll()`.
+* [ ] `maxResponseBytes` sized for your largest expected response, or streaming for big bodies.
+
+Where next: <<how-it-works>> explains the architecture and the DSL; Part II walks through everyday use in more depth.

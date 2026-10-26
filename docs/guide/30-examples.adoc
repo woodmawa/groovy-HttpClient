@@ -1,0 +1,222 @@
+[[examples]]
+== Examples
+
+Complete scripts. Each runs as it is with `groovy script.groovy` (Groovy 6, Java 25+): the `@Grab` line fetches the library. They call public test services, so results vary a little from run to run.
+
+[[examples-sync]]
+=== Synchronous
+
+.Read JSON from a REST API
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import org.softwood.http.GroovyHttpClient
+
+def api = new GroovyHttpClient('https://jsonplaceholder.typicode.com')
+
+api.getSync('/users').json.each { u ->
+    println "${u.id}  ${u.name.padRight(25)} ${u.email}"
+}
+----
+
+.Typed results, and "not found" as a value
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import org.softwood.http.GroovyHttpClient
+
+class Todo { Integer userId; Integer id; String title; Boolean completed }
+
+def api = new GroovyHttpClient('https://jsonplaceholder.typicode.com')
+
+Todo todo = api.getSync(Todo, '/todos/1')
+println "${todo.title} (done: ${todo.completed})"
+
+Todo missing = api.getSync(Todo, '/todos/0') {
+    response { when(404) { r -> null } }
+}
+println "missing: ${missing}"
+----
+
+.Create, update and delete a resource
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import org.softwood.http.GroovyHttpClient
+
+def api = new GroovyHttpClient('https://api.restful-api.dev')
+
+def created = api.postSync('/objects', null) {
+    json([name: 'Groovy HTTP Client test', data: [year: 2026, price: 1.0]])
+}.json
+println "created ${created.id}"
+
+def updated = api.putSync("/objects/${created.id}", null) {
+    json([name: 'Groovy HTTP Client test (updated)', data: [year: 2026, price: 2.0]])
+}.json
+println "updated to ${updated.data.price}"
+
+api.deleteSync("/objects/${created.id}")
+println 'deleted'
+----
+
+.Submit a form, follow the redirect, keep the cookie
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import org.softwood.http.GroovyHttpClient
+
+def bin = new GroovyHttpClient('https://httpbin.org')
+
+def r = bin.postSync('/redirect-to?url=/get&status_code=303', null) { form(user: 'alice') }
+println "ended at ${r.json.url} with ${r.statusCode}"           // the 303 was followed with a GET
+
+bin.getSync('/cookies/set?session=abc123')
+println "server sees cookies: ${bin.getSync('/cookies').json.cookies}"
+----
+
+.Upload a file with multipart
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import org.softwood.http.GroovyHttpClient
+import org.softwood.http.MultipartPart
+
+def bin = new GroovyHttpClient('https://httpbin.org')
+def csv = 'sku,qty\nA1,2\nB7,1\n'.bytes
+
+def r = bin.postMultipartSync('/post', [
+        MultipartPart.text('description', 'stock take'),
+        MultipartPart.bytes('file', 'stock.csv', 'text/csv', csv)
+])
+println r.json.form.description       // a text part is a form field
+println r.json.files.file             // a part with a filename is a file
+----
+
+.Authenticate, and handle errors
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import org.softwood.http.GroovyHttpClient
+import org.softwood.http.GroovyHttpClient.HttpResponseException
+
+def ok = GroovyHttpClient.builder('https://httpbin.org').auth { basic 'user', 'passwd' }.build()
+println ok.getSync('/basic-auth/user/passwd').json
+
+def wrong = GroovyHttpClient.builder('https://httpbin.org').auth { basic 'user', 'nope' }.build()
+try {
+    wrong.getSync('/basic-auth/user/passwd')
+} catch (HttpResponseException e) {
+    println e.message            // HTTP 401 Unauthorized (GET https://httpbin.org/basic-auth/user/passwd, 0 bytes)
+}
+----
+
+[[examples-async]]
+=== Asynchronous
+
+.Fan out and collect
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import org.softwood.http.GroovyHttpClient
+
+def api = new GroovyHttpClient('https://jsonplaceholder.typicode.com')
+
+long start = System.currentTimeMillis()
+def futures = (1..20).collect { id -> api.get("/posts/${id}") }
+def titles = futures*.join().collect { it.json.title }
+println "${titles.size()} posts in ${System.currentTimeMillis() - start} ms"
+----
+
+.Compose dependent requests
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import org.softwood.http.GroovyHttpClient
+
+def api = new GroovyHttpClient('https://jsonplaceholder.typicode.com')
+
+api.get('/posts/1')
+   .thenCompose { post -> api.get("/users/${post.json.userId}") }
+   .thenAccept { user -> println "post 1 was written by ${user.json.name}" }
+   .join()
+----
+
+.A deadline with a fallback
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import org.softwood.http.GroovyHttpClient
+import java.time.Duration
+
+def bin = new GroovyHttpClient('https://httpbin.org')
+
+def result = bin.get(Object, '/delay/5') {
+    timeout Duration.ofSeconds(2)
+    response {
+        success   { r -> 'fresh' }
+        exception { Throwable t -> "fallback (${t.class.simpleName})" }
+    }
+}.join()
+println result       // fallback (HttpTimeoutException)
+----
+
+[[examples-streaming]]
+=== Streaming
+
+.Download a file
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import org.softwood.http.GroovyHttpClient
+import java.nio.file.Path
+
+def bin = new GroovyHttpClient('https://httpbin.org')
+def r = bin.downloadSync('/image/png', Path.of('pig.png'))
+println "${r.bytesRead} bytes -> ${r.path}"
+----
+
+.Read an NDJSON stream
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import org.softwood.http.GroovyHttpClient
+
+def bin = new GroovyHttpClient('https://httpbin.org')
+def r = bin.ndjsonSync('/stream/5') { Map line -> println "record ${line.id}" }
+println "${r.items} records"
+----
+
+.Follow live Server-Sent Events, then stop
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import groovy.json.JsonSlurper
+import org.softwood.http.GroovyHttpClient
+import org.softwood.http.SseEvent
+import org.softwood.http.StreamControl
+
+def wiki = new GroovyHttpClient('https://stream.wikimedia.org')
+def json = new JsonSlurper()
+
+// Wikimedia refuses requests without a descriptive User-Agent (403)
+wiki.sseSync('/v2/stream/recentchange', {
+    header 'User-Agent', 'my-app/1.0 (me@example.com)'
+    maxResponseBytes Long.MAX_VALUE
+}) { SseEvent e, StreamControl c ->
+    def edit = json.parseText(e.data)
+    println "${edit.wiki}: ${edit.title}"
+    if (c.items == 10) c.stop()
+}
+----
+
+.Compressed responses
+[source,groovy,subs="attributes+"]
+----
+@Grab('{project-group}:{project-artifact}:{project-version}')
+import org.softwood.http.GroovyHttpClient
+
+def bin = GroovyHttpClient.builder('https://httpbin.org').compression(true).build()
+def r = bin.getSync('/gzip')
+println "decoded ${r.decoded}, server sent ${r.contentEncoding}, gzipped: ${r.json.gzipped}"
+----

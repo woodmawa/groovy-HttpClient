@@ -1,0 +1,28 @@
+[[url-builder]]
+== URL Builder
+
+`org.softwood.url.URLBuilder` builds URLs with encoded query parameters, for when you need a URL string rather than a request -- a link in an email, an absolute URL for `allowAbsoluteUrls` clients, a value for a test.
+
+[source,groovy]
+----
+import org.softwood.url.URLBuilder
+
+String url = new URLBuilder('api.example.com')          // the argument is the host
+        .port(8443)
+        .path('/v1/orders')
+        .param('status', 'open')
+        .param('tag', ['a', 'b'])                        // repeated: tag=a&tag=b
+        .build()
+// https://api.example.com:8443/v1/orders?status=open&tag=a&tag=b
+
+String same = new URLBuilder({
+    protocol 'https'
+    host 'api.example.com'
+    path 'v1/orders'                                     // a leading '/' is added
+    params(status: 'open', page: 2)
+}).build()
+----
+
+* The protocol defaults to `https`; the host is required (`build()` throws `IllegalStateException` without one).
+* Parameter names and values are encoded as form data, so a space becomes `+`.
+* `isValidURL(String)` checks a string parses as a URI.

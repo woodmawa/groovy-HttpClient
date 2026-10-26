@@ -1,0 +1,33 @@
+[[compression]]
+== Compression
+
+The JDK client does not decompress responses; this library can, opt-in:
+
+[source,groovy]
+----
+def client = GroovyHttpClient.builder('https://httpbin.org').compression(true).build()
+
+def r = client.getSync('/gzip')
+assert r.json.gzipped           // decoded for you
+assert r.decoded
+assert r.contentEncoding == 'gzip'
+
+client.getSync('/gzip') { compression false }     // per request, either way
+----
+
+* The client sends `Accept-Encoding: gzip, deflate` and decodes exactly those (gzip including multi-member, deflate in both the zlib and raw forms). Other encodings are passed through untouched. If you set `Accept-Encoding` yourself, nothing is decoded.
+* *The size limit counts decompressed bytes.* Decoding happens inside the bounded reader, so a small body that would inflate to gigabytes stops at the limit. This holds for buffered responses, error bodies, downloads and streams.
+* A decoded response has no `Content-Encoding` or `Content-Length` header (they described the compressed bytes); `r.contentEncoding` keeps what the server applied.
+* A corrupt or truncated body raises `ContentDecodingException`; it is not retried.
+
+=== Compressing requests
+
+[source,groovy]
+----
+client.postSync('/post', null) {
+    body(records, 'application/json')
+    gzipBody()                        // Content-Encoding: gzip
+}
+----
+
+`gzipBody()` works for every kind of body, including multipart and streamed files. It is never automatic -- many servers refuse compressed requests -- so use it only where the server accepts them.

@@ -1,0 +1,268 @@
+[[test-platform]]
+== The Test Platform
+
+Public test sites are good for trying things out. For your own code you need something you control: a server that returns exactly what each test needs, runs offline, and lets you check what your code sent. The library's *test platform* is that server, published so your tests can use it.
+
+[cols="2,4,2"]
+|===
+|Tool |What it is |Use it for
+
+|`MockHttpServer` |A real HTTP server on a free local port, answering each method and path with the status, headers and body you give it, and recording every request. |Any test framework (JUnit, Spock, a script).
+|`HttpClientTestDsl` |A fluent layer over a mock server: `when('/users/1').respondWithJson(...)`, then `verify('/users/1').wasCalled()`. |Readable tests with less code.
+|`HttpClientTestTrait` |A Spock trait: a shared server per specification and a ready-made client. |Spock specifications.
+|===
+
+Add the platform to your tests (Gradle):
+
+[source,groovy,subs="attributes+"]
+----
+testImplementation testFixtures('{project-group}:{project-artifact}:{project-version}')
+----
+
+<<testing>> has the Maven coordinates and the full API.
+
+=== Example 1: stub a service and check what your code sent
+
+Suppose your code under test is a small service class:
+
+[source,groovy]
+----
+class OrderService {
+    final GroovyHttpClient client
+    OrderService(GroovyHttpClient client) { this.client = client }
+
+    Map place(String sku, int qty) {
+        client.postSync('/orders', null) { json([sku: sku, qty: qty]) }.json
+    }
+}
+----
+
+A Spock test against `MockHttpServer`:
+
+[source,groovy]
+----
+import org.softwood.test.MockHttpServer
+
+class OrderServiceSpec extends Specification {
+    MockHttpServer server = new MockHttpServer()
+    def setup()   { server.init() }
+    def cleanup() { server.shutdown() }
+
+    def "places an order"() {
+        given:
+        def orders = server.addRequestCheck('POST', '/orders', 201)
+                .withResponseBody('{"id":42,"status":"placed"}')
+                .withResponseHeaders(['Content-Type': 'application/json'])
+        def service = new OrderService(new GroovyHttpClient(SecurityConfig.testing("http://localhost:${server.port}")))
+
+        when:
+        def result = service.place('A1', 2)
+
+        then:
+        result.id == 42
+        orders.lastRequest.bodyText == '{"sku":"A1","qty":2}'
+        orders.lastRequest.header('Content-Type').startsWith('application/json')
+    }
+}
+----
+
+The client is built with `SecurityConfig.testing(...)`: it allows the `+http://localhost+` URL, turns on logging, and puts the start of error bodies into exception messages so failures are easy to read.
+
+=== Example 2: the same with the test DSL
+
+[source,groovy]
+----
+import org.softwood.http.HttpClientTestDsl
+
+def server = HttpClientTestDsl.create().start()
+server.when('/orders').respondWithJson([id: 42, status: 'placed'], 201)
+
+def service = new OrderService(server.createClient())
+assert service.place('A1', 2).id == 42
+
+server.verify('/orders')
+      .wasCalled(1)
+      .withMethod('POST')
+      .withJsonBody { json -> json.sku == 'A1' && json.qty == 2 }
+server.close()
+----
+
+=== Example 3: a Spock specification with the trait
+
+[source,groovy]
+----
+import org.softwood.http.HttpClientTestTrait
+
+class OrderServiceTraitSpec extends Specification implements HttpClientTestTrait {
+
+    def setup() { resetTestServer() }          // each feature starts clean
+
+    def "places an order"() {
+        given:
+        mockEndpoint('/orders') {
+            status 201
+            json([id: 42, status: 'placed'])
+        }
+
+        expect:
+        new OrderService(createTestClient()).place('A1', 2).status == 'placed'
+        verifyRequest('/orders').wasCalled(1).withMethod('POST')
+    }
+}
+----
+
+=== Example 4: test the unhappy paths
+
+The cases that matter most are the ones a public site will not give you on demand:
+
+[source,groovy]
+----
+def "a 503 is retried, then reported"() {
+    given:
+    def check = server.addRequestCheck('GET', '/orders/42', 503)
+    def client = GroovyHttpClient.builder("http://localhost:${server.port}")
+            .retryPolicy(new GroovyHttpClient.RetryPolicy.Config().tap {
+                maxAttempts 3; backoffExponential(10, 20, false); on5xx(true)
+            }.build())
+            .build()
+
+    when:
+    client.getSync('/orders/42')
+
+    then:
+    def e = thrown(GroovyHttpClient.HttpResponseException)
+    e.statusCode == 503
+    check.received.size() == 3                  // the first attempt and two retries
+}
+
+def "a slow service hits the timeout"() {
+    given:
+    server.addRequestCheck('GET', '/slow', 200).withDelay(2_000)
+    def client = new GroovyHttpClient(SecurityConfig.testing("http://localhost:${server.port}"))
+
+    when:
+    client.getSync('/slow') { timeout Duration.ofMillis(200) }
+
+    then:
+    thrown(java.net.http.HttpTimeoutException)
+}
+
+def "the session cookie is sent back"() {
+    given:
+    server.addRequestCheck('POST', '/login', 200).withResponseCookies([SESSION: 's-1'])
+    server.addRequestCheck('GET', '/me', 200).withExpectedCookies([SESSION: 's-1']).withResponseBody('{"user":"alice"}')
+    def client = new GroovyHttpClient(SecurityConfig.testing("http://localhost:${server.port}"))
+
+    when:
+    client.postSync('/login', null) { form(user: 'alice') }
+
+    then:
+    client.getSync('/me').json.user == 'alice'   // 400 if the cookie were missing
+}
+----
+
+[[async-testing]]
+=== Example 5: test asynchronous code
+
+Asynchronous calls finish after the line that starts them, so a test must wait -- but never with `Thread.sleep`, which is either too short (a flaky test) or too long (a slow suite). Use one of two tools.
+
+*When you hold the future: Groovy 6's `await`.* Groovy 6 has `await` built in. It waits for a `CompletableFuture` and returns its value, and if the future failed it throws the *original* exception -- not a `CompletionException` -- so Spock's `thrown(...)` works directly:
+
+[source,groovy]
+----
+def "fetches two orders concurrently"() {
+    given:
+    server.addRequestCheck('GET', '/orders/1', 200).withResponseBody('{"id":1}')
+            .withResponseHeaders(['Content-Type': 'application/json'])
+    server.addRequestCheck('GET', '/orders/2', 200).withResponseBody('{"id":2}')
+            .withResponseHeaders(['Content-Type': 'application/json'])
+
+    when:
+    def (a, b) = await(client.get('/orders/1'), client.get('/orders/2'))    // both in flight together
+
+    then:
+    a.json.id == 1
+    b.json.id == 2
+}
+
+def "an async failure surfaces as the real exception"() {
+    given:
+    server.addRequestCheck('GET', '/orders/9', 404)
+
+    when:
+    await client.get('/orders/9')
+
+    then:
+    thrown(GroovyHttpClient.HttpResponseException)
+}
+----
+
+To bound the wait, give the future a timeout first: `await client.get('/orders/1').orTimeout(2, TimeUnit.SECONDS)` throws `TimeoutException` if it takes longer.
+
+*When there is no future: Awaitility.* Some code starts work and returns without a future -- a fire-and-forget audit call, an event stream consumer, a circuit breaker listener. Wait for the *effect* instead, with https://github.com/awaitility/awaitility[Awaitility] (`testImplementation 'org.awaitility:awaitility:4.3.0'`):
+
+[source,groovy]
+----
+import org.awaitility.Awaitility
+import java.util.concurrent.CopyOnWriteArrayList
+import static java.util.concurrent.TimeUnit.SECONDS
+
+class AuditService {
+    final GroovyHttpClient client
+    AuditService(GroovyHttpClient client) { this.client = client }
+    void record(String event) { client.post('/audit', null) { json([event: event]) } }    // does not wait
+}
+
+def "audit events are sent in the background"() {
+    given:
+    def audit = server.addRequestCheck('POST', '/audit', 202)
+
+    when:
+    new AuditService(client).record('login')
+
+    then:
+    Awaitility.await().atMost(5, SECONDS).until { audit.received.size() == 1 }
+    audit.lastRequest.bodyText == '{"event":"login"}'
+}
+
+def "the circuit opening is reported"() {
+    given:
+    server.addRequestCheck('GET', '/fail', 500)
+    def c = new GroovyHttpClient(SecurityConfig.testing("http://localhost:${server.port}").withOverrides(failureThreshold: 2))
+    def states = new CopyOnWriteArrayList()
+    c.onCircuitStateChange { from, to -> states << to }
+
+    when:
+    2.times { c.get('/fail') }                  // asynchronous: nothing waits for these
+
+    then:
+    Awaitility.await().atMost(5, SECONDS).untilAsserted {
+        assert states == [GroovyHttpClient.State.OPEN]
+    }
+}
+----
+
+`until { condition }` polls the closure until it is true; `untilAsserted { assert ... }` polls until the assertions pass and, on timeout, fails with the last assertion's message. Collect results in thread-safe collections (`CopyOnWriteArrayList`, `ConcurrentHashMap`), because the client's callbacks run on its own threads.
+
+WARNING: In Groovy 6, `await` is a language feature, so a statically imported `Awaitility.await()` is shadowed by it: `import static org.awaitility.Awaitility.await` followed by `await().atMost(...)` does not call Awaitility. Write `Awaitility.await()` in full, as above.
+
+[cols="2,3"]
+|===
+|You have a future (`client.get(...)`) |`await future` -- or `future.join()` if you prefer plain Java
+|You are waiting for a side effect (a request reaching the server, a callback, a listener) |`Awaitility.await().atMost(...).until { ... }`
+|You need to assert a sequence of events |`Awaitility.await()...untilAsserted { assert ... }`
+|===
+
+=== Choosing between public sites and the test platform
+
+[cols="2,2"]
+|===
+|Public test sites |Test platform
+
+|Learning the API, trying an idea, demos |Your automated tests
+|Real network, real TLS, real HTTP/3 |Local, fast, offline, deterministic
+|You get what the site returns |You decide every status, header, body and delay
+|Rate-limited, occasionally down |Always there
+|===
+
+The full reference -- every method of the three tools -- is in <<testing>>.

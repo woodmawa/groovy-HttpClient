@@ -1,0 +1,38 @@
+[[test-sites]]
+== Public Test Sites
+
+The examples in this part run against public services, so you can paste them into a Groovy script or console and see real responses.
+
+[cols="2,4,3"]
+|===
+|Site |Good for |Try
+
+|https://httpbin.org[httpbin.org]
+|Echoes requests back as JSON. Status codes, redirects, cookies, basic and bearer auth, gzip and deflate, delays, streams.
+|`/get`, `/post`, `/status/404`, `/redirect/2`, `/cookies/set?flavour=oat`, `/basic-auth/user/pass`, `/gzip`, `/stream/5`, `/delay/2`
+
+|https://postman-echo.com[postman-echo.com]
+|An alternative echo service.
+|`/get`, `/post`, `/headers`
+
+|https://jsonplaceholder.typicode.com[jsonplaceholder.typicode.com]
+|A fake REST API with realistic resources: good for typed results.
+|`/posts/1`, `/users`, `/todos?userId=1`
+
+|https://restful-api.dev[api.restful-api.dev]
+|A REST API whose objects you can create, update and delete.
+|`/objects`, `/objects/7`
+
+|https://stream.wikimedia.org[stream.wikimedia.org]
+|A public Server-Sent Events stream of live Wikipedia edits. Send a descriptive `User-Agent` header, or it answers 403.
+|`/v2/stream/recentchange`
+|===
+
+For HTTP/3, see the endpoints listed in <<introduction>>.
+
+[NOTE]
+====
+Public services are shared, rate-limited and occasionally down. They are for trying things out; your own tests should use the published mock server instead (<<testing>>), which is fast, deterministic and works offline.
+====
+
+The default client allows requests only to its base URL's host. To call several of these sites, create one client per site -- the normal pattern -- or allow absolute URLs (<<creating-a-client>>).

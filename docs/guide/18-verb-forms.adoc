@@ -1,0 +1,126 @@
+[[verb-forms]]
+== Verb Forms
+
+The *verbs* are the client methods that send requests, named after the HTTP method they send: `get`, `post`, `put`, `patch`, `delete`, `head`, `options`. Each comes in a small, regular set of forms, so once you know the pattern you know every method.
+
+=== Anatomy of a call
+
+[source,groovy]
+----
+Order order = client.postSync(Order, '/orders', null) { json(newOrder) }
+//                   |   |     |      |         |     |
+//                   |   |     |      |         |     +-- request closure: the DSL (optional)
+//                   |   |     |      |         +-------- body string (post, put, patch only; often null)
+//                   |   |     |      +------------------ path, appended to the base URL
+//                   |   |     +------------------------- result type (optional): a typed result
+//                   |   +------------------------------- Sync: wait for the result (omit for a future)
+//                   +----------------------------------- the HTTP method
+----
+
+Three choices make up every form:
+
+. *Sync or async* -- `getSync` waits and returns the result; `get` returns a `CompletableFuture` immediately.
+. *Untyped or typed* -- without a type you get an `HttpClientResponse`; with `get(Type, ...)` you get a `Type`.
+. *With or without a closure* -- the closure configures the request; leave it out when the defaults suffice.
+
+=== The forms
+
+[cols="3,2,3"]
+|===
+|Form |Returns |Use it when
+
+|`getSync(path)` |`HttpClientResponse` |A plain request, result needed now
+|`getSync(path) { ... }` |`HttpClientResponse` |The request needs query, headers, a body or settings
+|`getSync(path, closure, Duration)` |`HttpClientResponse` |You need a different wait than 30 s
+|`getSync(Type, path) { ... }` |`Type` |You want your own class back, or a response handler's value
+|`get(path) { ... }` |`CompletableFuture<HttpClientResponse>` |Concurrency or composition
+|`get(Type, path) { ... }` |`CompletableFuture<Type>` |The same, typed
+|`postSync(path, String body) { ... }` |`HttpClientResponse` |`post`, `put`, `patch`: a body string, or `null` and build it in the closure
+|`postSync(Type, path, body) { ... }` |`Type` |Typed POST, PUT, PATCH
+|===
+
+`head`, `options` and `delete` take the same arguments as `get`; `delete` also has typed forms. `head` and `options` have no typed forms, since their answers are headers.
+
+[source,groovy]
+----
+def r      = client.getSync('/orders/42')                                   // untyped, sync
+Order o    = client.getSync(Order, '/orders/42')                            // typed, sync
+def future = client.get('/orders/42') { header 'X-Trace', traceId }         // untyped, async
+CompletableFuture<Order> f = client.get(Order, '/orders/42')                // typed, async
+Order made = client.postSync(Order, '/orders', null) { json(newOrder) }     // typed POST
+client.deleteSync('/orders/42')
+def h      = client.headSync('/files/report.pdf')
+----
+
+=== Typed forms in detail
+
+The type argument does two jobs:
+
+* *Without response handlers*, a 2xx body is mapped onto the type (<<codecs>>); a status of 400 or more still throws.
+* *With response handlers*, the handler's return value is the result. It must be an instance of the type (or `null`); a handler that returns the response itself has it mapped onto the type.
+
+[source,groovy]
+----
+Order o   = client.getSync(Order, '/orders/42')                               // mapped
+Order m   = client.getSync(Order, '/orders/42') { response { when(404) { null } } }
+Object v  = client.getSync(Object, '/flags') { response { success { r -> r.json.enabled } } }
+String s  = client.getSync(String, '/readme.txt')                             // the body as text
+byte[] b  = client.getSync(byte[], '/logo.png')                               // the raw bytes
+----
+
+Use `Object` as the type when handlers return different types for different outcomes.
+
+=== Streaming verbs
+
+Streaming verbs deliver the body somewhere other than memory (<<streaming>>):
+
+[cols="3,2,3"]
+|===
+|Form |Returns |Use it when
+
+|`downloadSync(path, Path / File / OutputStream) { ... }` |`StreamResult` |A large body to a file or stream
+|`download(...)` |`CompletableFuture<StreamResult>` |The same, without waiting
+|`linesSync(path) { String line -> }` |`StreamResult` |Text that arrives line by line
+|`sseSync(path) { SseEvent e -> }` |`StreamResult` |Server-Sent Events
+|`ndjsonSync(path) { Map value -> }` |`StreamResult` |Newline-delimited JSON
+|`lines`, `sse`, `ndjson` |`CompletableFuture<StreamResult>` |The same, without waiting
+|`downloadBytesSync(path)` / `downloadBytes(path) { ... }` |`byte[]` |A small binary body straight into an array
+|===
+
+For `lines`, `sse` and `ndjson`, the *last* closure is your consumer; to configure the request as well, pass a request closure before it:
+
+[source,groovy]
+----
+client.sseSync('/events', { header 'Last-Event-ID', lastId; idleTimeout Duration.ofSeconds(30) }) { SseEvent e ->
+    handle(e)
+}
+----
+
+A consumer may take a second `StreamControl` parameter to stop early: `{ String line, StreamControl c -> if (done) c.stop() }`.
+
+Any verb can stream its response by putting a streaming target in the request closure -- for a POST that answers with a file or an event stream:
+
+[source,groovy]
+----
+StreamResult r = client.postSync(StreamResult, '/exports', null) { json(query); downloadTo Path.of('export.csv') }
+client.postSync(StreamResult, '/v1/chat', null) { json(prompt); sse { SseEvent e -> print e.data } }
+----
+
+=== Multipart verbs
+
+[cols="3,2,3"]
+|===
+|`postMultipartSync(path) { b -> b.part { ... } }` |`HttpClientResponse` |Parts described in the multipart DSL
+|`postMultipartSync(path, List<MultipartPart>) { ... }` |`HttpClientResponse` |Parts built in code; the closure configures the request
+|`postMultipart(...)` |`CompletableFuture<HttpClientResponse>` |The same, without waiting
+|===
+
+=== Writing the calls in Groovy
+
+* A closure as the last argument goes outside the parentheses: `client.getSync('/x') { ... }`. With no other arguments the parentheses can go too: `client.getSync '/x'`.
+* `null` for the body of `post`, `put` and `patch` is normal: the closure sets the body.
+* A request closure can be stored and reused: `def asJson = { header 'Accept', 'application/json' }` then `client.getSync('/x', asJson)`.
+
+=== Exceptions
+
+The `++*Sync++` forms throw the request's exception directly (`HttpResponseException`, `HttpTimeoutException`...). The asynchronous forms complete the future exceptionally with the same exception; `join()` wraps it in `CompletionException`, `get()` in `ExecutionException`, so in asynchronous code prefer handling failures in the chain or with a `response { exception { ... } }` handler.

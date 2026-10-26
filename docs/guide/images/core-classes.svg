@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="600" viewBox="0 0 820 600" font-family="sans-serif">
+  <!-- groups -->
+  <rect x="10" y="10" width="800" height="54" rx="6" fill="#eef4fb" stroke="#4a78b0"/>
+  <text x="22" y="30" font-size="12" font-weight="bold" fill="#1f3f66">Your code</text>
+  <text x="22" y="50" font-size="11" fill="#1f3f66">client.getSync('/orders') { query(...); auth { ... }; response { ... } }   ·   client.get(Order, '/orders/42')   ·   client.sseSync(...)</text>
+
+  <!-- central client -->
+  <rect x="270" y="90" width="280" height="96" rx="6" fill="#ffffff" stroke="#1f3f66" stroke-width="2"/>
+  <text x="410" y="110" font-size="14" font-weight="bold" text-anchor="middle" fill="#1f3f66">GroovyHttpClient</text>
+  <text x="410" y="128" font-size="10.5" text-anchor="middle" fill="#333">verbs: get / post / put / patch / delete / head / options</text>
+  <text x="410" y="143" font-size="10.5" text-anchor="middle" fill="#333">*Sync · typed · download · lines · sse · ndjson · postMultipart</text>
+  <text x="410" y="160" font-size="10.5" text-anchor="middle" fill="#333">default headers · cookies · interceptors · close()</text>
+  <text x="410" y="176" font-size="10" text-anchor="middle" fill="#666">one per base URL, thread-safe, AutoCloseable</text>
+
+  <!-- configuration (left) -->
+  <rect x="10" y="90" width="230" height="96" rx="6" fill="#f6f6f6" stroke="#888"/>
+  <text x="22" y="108" font-size="12" font-weight="bold" fill="#333">Configuration</text>
+  <text x="22" y="126" font-size="10.5" fill="#333">GroovyHttpClient.Builder</text>
+  <text x="22" y="141" font-size="10.5" fill="#333">SecurityConfig  (profiles, withOverrides)</text>
+  <text x="22" y="156" font-size="10.5" fill="#333">RetryPolicy · HttpVersion · Http3Discovery</text>
+  <text x="22" y="171" font-size="10.5" fill="#333">CodecRegistry · AuthPolicy</text>
+  <line x1="240" y1="138" x2="270" y2="138" stroke="#888" stroke-width="1.5"/>
+  <text x="245" y="132" font-size="9" fill="#666">builds</text>
+
+  <!-- test fixtures (right) -->
+  <rect x="580" y="90" width="230" height="96" rx="6" fill="#fdf6e9" stroke="#c08a2b" stroke-dasharray="5,3"/>
+  <text x="592" y="108" font-size="12" font-weight="bold" fill="#7a5410">Test fixtures (separate artifact)</text>
+  <text x="592" y="126" font-size="10.5" fill="#333">MockHttpServer</text>
+  <text x="592" y="141" font-size="10.5" fill="#333">HttpClientTestDsl</text>
+  <text x="592" y="156" font-size="10.5" fill="#333">HttpClientTestTrait (Spock)</text>
+  <text x="592" y="171" font-size="10" fill="#666">real local HTTP server for your tests</text>
+
+  <line x1="410" y1="64" x2="410" y2="90" stroke="#1f3f66" stroke-width="1.5"/>
+
+  <!-- request side -->
+  <rect x="10" y="214" width="390" height="120" rx="6" fill="#eef8ee" stroke="#4c8c4a"/>
+  <text x="22" y="232" font-size="12" font-weight="bold" fill="#2f5e2d">Request side</text>
+  <text x="22" y="250" font-size="10.5" fill="#333">GroovyRequestBuilder: the request DSL (query, header, json, form,</text>
+  <text x="22" y="264" font-size="10.5" fill="#333">  body, timeout, retry, auth, response, downloadTo, lines, sse ...)</text>
+  <text x="22" y="282" font-size="10.5" fill="#333">CodecRegistry: Encoder by media type (JSON, XML, CSV, form, text)</text>
+  <text x="22" y="300" font-size="10.5" fill="#333">AuthPolicy: basic · bearer · apiKey · OAuth2ClientCredentials</text>
+  <text x="22" y="318" font-size="10.5" fill="#333">MultipartPart · streamed uploads (Path, InputStream, Publisher)</text>
+
+  <!-- response side -->
+  <rect x="420" y="214" width="390" height="120" rx="6" fill="#f3eefb" stroke="#7656a8"/>
+  <text x="432" y="232" font-size="12" font-weight="bold" fill="#4b3477">Response side</text>
+  <text x="432" y="250" font-size="10.5" fill="#333">HttpClientResponse: status, headers, body, json, xml, parsed, bodyAs</text>
+  <text x="432" y="268" font-size="10.5" fill="#333">ResponseHandlers: success · when · failure · exception</text>
+  <text x="432" y="286" font-size="10.5" fill="#333">CodecRegistry: Parser by media type · typed results (Jackson optional)</text>
+  <text x="432" y="304" font-size="10.5" fill="#333">StreamResult · StreamControl · SseEvent</text>
+  <text x="432" y="322" font-size="10.5" fill="#333">HttpResponseException (problem details) · ResponseTooLargeException</text>
+
+  <line x1="330" y1="186" x2="205" y2="214" stroke="#4c8c4a" stroke-width="1.5"/>
+  <line x1="490" y1="186" x2="615" y2="214" stroke="#7656a8" stroke-width="1.5"/>
+
+  <!-- pipeline -->
+  <rect x="10" y="362" width="800" height="108" rx="6" fill="#fff6f4" stroke="#b45a45"/>
+  <text x="22" y="380" font-size="12" font-weight="bold" fill="#7e3424">Request pipeline (per request, inside the client)</text>
+  <g font-size="10.5" fill="#333" text-anchor="middle">
+    <rect x="22" y="392" width="118" height="34" rx="4" fill="#fff" stroke="#b45a45"/><text x="81" y="413">Circuit breaker</text>
+    <rect x="152" y="392" width="118" height="34" rx="4" fill="#fff" stroke="#b45a45"/><text x="211" y="413">Retry loop</text>
+    <rect x="282" y="392" width="118" height="34" rx="4" fill="#fff" stroke="#b45a45"/><text x="341" y="413">Interceptors</text>
+    <rect x="412" y="392" width="118" height="34" rx="4" fill="#fff" stroke="#b45a45"/><text x="471" y="413">Credentials</text>
+    <rect x="542" y="392" width="118" height="34" rx="4" fill="#fff" stroke="#b45a45"/><text x="601" y="413">Redirect checks</text>
+    <rect x="672" y="392" width="126" height="34" rx="4" fill="#fff" stroke="#b45a45"/><text x="735" y="413">Bounded body reader</text>
+  </g>
+  <g stroke="#b45a45" stroke-width="1.3">
+    <line x1="140" y1="409" x2="152" y2="409"/><line x1="270" y1="409" x2="282" y2="409"/><line x1="400" y1="409" x2="412" y2="409"/>
+    <line x1="530" y1="409" x2="542" y2="409"/><line x1="660" y1="409" x2="672" y2="409"/>
+  </g>
+  <text x="22" y="448" font-size="10" fill="#666">Internal packages: org.softwood.http.compression (gzip/deflate inside the size limit) · .streaming (bounded subscriber, line/SSE/NDJSON</text>
+  <text x="22" y="462" font-size="10" fill="#666">parsers) · .proxy (proxy selection, SOCKS refusal). Not public API.</text>
+
+  <!-- jdk -->
+  <rect x="10" y="498" width="800" height="90" rx="6" fill="#f0f0f0" stroke="#555"/>
+  <text x="22" y="516" font-size="12" font-weight="bold" fill="#222">JDK platform</text>
+  <text x="22" y="536" font-size="10.5" fill="#333">java.net.http.HttpClient: HTTP/1.1 · HTTP/2 · HTTP/3 (JDK 26+) · TLS (SSLContext from SecurityConfig) · ProxySelector</text>
+  <text x="22" y="554" font-size="10.5" fill="#333">Virtual-thread executor per client · java.net.CookieManager (cookie store and policy)</text>
+  <text x="22" y="572" font-size="10.5" fill="#333">SLF4J API for logging (bring your own binding)</text>
+  <line x1="410" y1="470" x2="410" y2="498" stroke="#555" stroke-width="1.5"/>
+  <line x1="410" y1="334" x2="410" y2="362" stroke="#555" stroke-width="1.5"/>
+</svg>

@@ -1,0 +1,80 @@
+[[streaming]]
+== Streaming in Depth
+
+[[downloads]]
+=== Downloads
+
+[source,groovy]
+----
+StreamResult r = client.downloadSync('/exports/2026-10.csv', Path.of('exports/2026-10.csv'))
+r.statusCode; r.bytesRead; r.path; r.contentType; r.headers
+
+client.download('/big.iso', Path.of('big.iso'))           // CompletableFuture<StreamResult>
+client.downloadSync('/big.iso', new File('big.iso'))
+client.downloadSync('/report.pdf', outputStream)          // your stream: flushed, never closed
+client.downloadSync('/archive.zip', target) { maxResponseBytes 5_000_000_000L }
+----
+
+* The body goes to a temporary file next to the target and is moved into place only when complete. A failure deletes the temporary file and leaves an existing target untouched.
+* Only a final 2xx body is written. Error bodies are kept in memory for `HttpResponseException`; the target is never created.
+* `maxResponseBytes` counts the bytes written (decoded bytes with compression).
+* A download to a file may be retried by the retry policy; one to an `OutputStream` only until its first byte is written.
+* `downloadTo(...)` in any request closure streams that request's body, so a POST that answers with a file works too. Use the typed verb to get the `StreamResult`: `client.postSync(StreamResult, '/exports', json) { downloadTo target }`.
+
+[[event-streams]]
+=== Lines, Server-Sent Events and NDJSON
+
+[source,groovy]
+----
+client.linesSync('/logs/tail') { String line -> println line }
+client.ndjsonSync('/feed') { Map record -> store(record) }
+client.sseSync('/events') { SseEvent e -> println "${e.event}: ${e.data}" }
+
+client.sseSync('/events', { header 'Last-Event-ID', lastSeen }) { SseEvent e -> handle(e) }   // with request settings
+
+// any verb: e.g. an API that answers a POST with an event stream
+client.postSync(StreamResult, '/v1/chat', JsonOutput.toJson(prompt)) {
+    header 'Content-Type', 'application/json'
+    sse { SseEvent e -> print e.data }
+}
+----
+
+* Items arrive in order, one at a time; the next bytes are read only after your consumer returns.
+* A consumer that throws fails the request with that exception. A stream is never retried once an item has been delivered.
+* An error status raises `HttpResponseException`; the consumer never runs.
+* Lines end at `\n`, `\r\n` or `\r`, decoded with the `Content-Type` charset (UTF-8 by default; UTF-16 is not supported).
+* `SseEvent` has `event` (`message` if unnamed), `data` (multi-line data joined with `\n`), `id` (persists across events) and `retry`. The client does not reconnect; send the last `id` as `Last-Event-ID` to resume.
+* The `StreamResult` reports `items`, `bytesRead` and `stopped`.
+
+=== Stopping early
+
+[source,groovy]
+----
+client.linesSync('/logs/tail') { String line, StreamControl c ->
+    if (line.contains('READY')) c.stop()
+}
+----
+
+After `stop()` nothing more is delivered, the response is cancelled, and the call completes normally with `stopped == true`, on every protocol. Cancelling the future also ends the stream.
+
+=== Limits and timeouts for long streams
+
+* `maxStreamItemBytes` (1 MiB by default) bounds any single line, event or value; over it, `StreamItemTooLargeException`.
+* `maxResponseBytes` still bounds the whole body, so raise it for a stream meant to run for hours: `{ maxResponseBytes Long.MAX_VALUE }`.
+* The request timeout ends at the response headers. Use `idleTimeout Duration.ofSeconds(30)` to fail a stream that goes silent; time spent in your consumer does not count.
+* The stream `++*Sync++` methods have no wait limit of their own.
+
+[[uploads]]
+=== Uploads
+
+[source,groovy]
+----
+client.putSync('/files/42', null) { body Path.of('big.bin') }              // Content-Length set; replayable
+client.putSync('/files/42', null) { body new File('data.csv'), 'text/csv' }
+client.postSync('/ingest', null) { body inputStream, 'application/x-ndjson' }      // chunked; one-shot
+client.postSync('/ingest', null) { body publisher, 'application/octet-stream' }    // Flow.Publisher; one-shot
+----
+
+A file's content type is the one you give, else probed from its name, else `application/octet-stream`; a missing file fails before anything is sent. A file body is re-sent on retry and on 307/308 redirects. An `InputStream` or publisher body is sent once: it is never retried, and a 307/308 redirect is refused.
+
+WARNING: A hot publisher such as `SubmissionPublisher` drops items emitted before anyone subscribes. Start emitting once `numberOfSubscribers > 0`.

@@ -1,6 +1,6 @@
 # Groovy HTTP Client
 
-A modern, production-ready HTTP client for Groovy and Java applications, built on Java's standard `HttpClient` API with **virtual threads**, comprehensive **security controls**, and a powerful **testing framework**.
+A production-ready HTTP client for Groovy and Java, built on the JDK `HttpClient` and virtual threads: secure defaults, HTTP/1.1, HTTP/2 and HTTP/3, a Groovy request DSL, and a testing toolkit you can use in your own tests.
 
 [![Java](https://img.shields.io/badge/Java-25+-blue.svg)](https://openjdk.org/projects/jdk/25/)
 [![Groovy](https://img.shields.io/badge/Groovy-6.0+-orange.svg)](https://groovy-lang.org/)
@@ -9,656 +9,373 @@ A modern, production-ready HTTP client for Groovy and Java applications, built o
 
 ---
 
-## What's new in 2.0
+## What's new in 2.1
 
-2.0.0 requires **Java 25+** and **Groovy 6**, and fixes the findings of a security review of 1.0.2. Several defaults change. **Read the [upgrade guide](docs/chapters/12-upgrading-2.0.adoc) before upgrading.**
+2.1 is source-compatible with 2.0 and every new capability is opt-in.
 
-- `new GroovyHttpClient(url)` now **verifies TLS certificates**. In 1.x it accepted any certificate.
-- Redirects are checked against `allowedHosts` on every hop, never downgrade HTTPS to HTTP, and drop credentials when the origin changes.
-- `maxResponseBytes` is enforced while the body streams in, not after it is fully buffered.
-- `allowRedirects(false)` and other explicit `false`/`0` settings now take effect.
-- 5xx retries work; POST/PATCH are retried only with `retryNonIdempotent(true)`.
-- `*Sync` methods throw the real exception (`HttpResponseException`, ...) instead of `ExecutionException`.
-- Cookie and multipart header values are validated; per-request `timeout(...)` works; `enableLogging` logs credential-safe request lines.
-- No bundled logging backend: add your own SLF4J binding.
-- **New: HTTP/3** on JDK 26+ (`builder(url).http3()`), falling back to HTTP/2 elsewhere.
+- **Codecs and typed results**: JSON, XML, CSV, form and text built in, optional Jackson, `+json` media types such as `application/problem+json`, and `getSync(Customer, '/customers/42')`.
+- **Response handlers**: `response { success {}; when(404) {}; failure {}; exception {} }` turns outcomes into values.
+- **Error detail**: `HttpResponseException` carries status, headers, method, URI and body as fields, parses RFC 9457 problem details, and keeps the body out of its message.
+- **Streaming**: downloads to a file or stream; uploads from a file, stream or publisher; line, Server-Sent Event and NDJSON consumers.
+- **Compression**: opt-in gzip/deflate, with `maxResponseBytes` counting decompressed bytes.
+- **Authentication**: basic, bearer, API key and OAuth2 client credentials.
+- **Proxies**: an explicit HTTP proxy with authentication and bypass rules; SOCKS is refused rather than silently bypassed.
+- **Published test fixtures**: `MockHttpServer`, `HttpClientTestDsl` and `HttpClientTestTrait` as a `test-fixtures` artifact.
+- **Observability**: per-client metrics (`client.metrics.snapshot()`), circuit breaker inspection (`client.circuitBreakerStatus`) and state-change listeners.
 
----
-
-## 🚀 Key Features
-
-### **Modern Architecture**
-- **Virtual Thread Executor** — Handle millions of concurrent requests with minimal overhead
-- **HTTP/2 and HTTP/3** — HTTP/2 by default; HTTP/3 (QUIC) on JDK 26+ with `http3()`, detected at runtime from one jar
-
-```groovy
-def client = GroovyHttpClient.builder("https://cloudflare.com").http3().build()
-def resp = client.getSync("/cdn-cgi/trace")
-println resp.httpVersion   // HTTP_3 when QUIC was negotiated
-```
-- **Zero Magic** — Wraps Java's standard `HttpClient` — no reflection, no bytecode manipulation
-
-### **Groovy-First Design**
-- **Fluent DSL** — Natural, expressive syntax for requests, headers, and multipart uploads
-- **Automatic JSON/XML Parsing** — Built-in content-type aware response handling
-- **Closure-Based Configuration** — Groovy-idiomatic request building
-
-### **Production-Ready Resilience**
-- **Circuit Breaker** — Automatic failure detection with CLOSED → OPEN → HALF_OPEN states
-- **Retry Policies** — Exponential backoff with jitter for transient failures
-- **Request/Response Interceptors** — Logging, metrics, and custom processing
-
-### **Security by Default**
-- **Verified TLS by default** — only the explicitly named `trustAll()` profile skips certificate checks
-- **Environment-Aware Profiles** — `defaults()`, `production()`, `staging()`, `testing()`, `trustAll()`
-- **SSRF Protection** — Host allow-listing for absolute URLs *and every redirect hop*
-- **Bounded Responses** — downloads cancelled as soon as `maxResponseBytes` is crossed
-- **TLS Configuration** — Custom trust stores, hostname verification, protocol selection
-- **Configurable Timeouts** — Connect, request, and synchronous operation limits
-
-### **Comprehensive Testing Framework**
-- **MockHttpServer** — Lightweight, dependency-free embedded test server
-- **HttpClientTestDsl** — Fluent DSL for endpoint mocking and verification
-- **HttpClientTestTrait** — Spock trait for seamless test integration
-- **Request Recording** — Rich assertions for headers, body, cookies, and query parameters
+Behaviour changes to check when upgrading from 2.0 are listed under [Upgrading](#upgrading).
 
 ---
 
-## 📦 Quick Start
+## Installation
 
-### Installation
+**Gradle**
 
-**Gradle:**
 ```groovy
 dependencies {
-    implementation 'io.github.woodmawa:groovy-httpclient:2.0.0'
-    runtimeOnly 'ch.qos.logback:logback-classic:1.6.5'   // or any SLF4J binding
+    implementation 'io.github.woodmawa:groovy-httpclient:2.1.0'
+
+    // optional: the mock server, test DSL and Spock trait for your own tests
+    testImplementation testFixtures('io.github.woodmawa:groovy-httpclient:2.1.0')
 }
 ```
 
-**Maven:**
+**Maven**
+
 ```xml
 <dependency>
     <groupId>io.github.woodmawa</groupId>
     <artifactId>groovy-httpclient</artifactId>
-    <version>2.0.0</version>
+    <version>2.1.0</version>
+</dependency>
+
+<!-- optional test fixtures -->
+<dependency>
+    <groupId>io.github.woodmawa</groupId>
+    <artifactId>groovy-httpclient</artifactId>
+    <version>2.1.0</version>
+    <classifier>test-fixtures</classifier>
+    <scope>test</scope>
 </dependency>
 ```
 
-### Basic Usage
+**Requirements**: Java 25+ (HTTP/3 needs JDK 26+), Groovy 6.0+, and any SLF4J 2.x binding. `jackson-databind` 2.x is optional.
+
+---
+
+## Quick start
 
 ```groovy
 import org.softwood.http.GroovyHttpClient
 
-// Create a client (verified TLS, safe defaults); replace with the API endpoint of your choice
-def client = new GroovyHttpClient("https://api.github.com")
+def client = new GroovyHttpClient('https://api.example.com')
 
-// Make GET request
-def response = client.getSync("/users/octocat")
+def response = client.getSync('/users/123')
+println response.statusCode
+println response.json.name
+```
 
-println "Status: ${response.statusCode}"
-println "User: ${response.json.name}"
+`new GroovyHttpClient(url)` uses `SecurityConfig.defaults(url)`: certificates and host names are verified, absolute URLs are refused, redirects are followed only to allowed hosts, and nothing is retried. For anything else use the builder:
 
-// POST with JSON
-def userData = [name: "Alice", email: "alice@example.com"]
-def created = client.postSync("/users", null) {
-    json(userData)
-    header "Authorization", "Bearer ${token}"
+```groovy
+def client = GroovyHttpClient.builder('https://api.example.com')
+        .requestTimeout(Duration.ofSeconds(10))
+        .retryPolicy(new GroovyHttpClient.RetryPolicy.Config().tap {
+            maxAttempts(3); backoffExponential(200, 2_000, true)
+        }.build())
+        .compression(true)
+        .auth { bearer token }
+        .build()
+```
+
+Every verb has a synchronous form (`getSync`, returning the result) and an asynchronous one (`get`, returning a `CompletableFuture`).
+
+---
+
+## Requests
+
+```groovy
+client.getSync('/search') {
+    query(q: 'groovy', limit: 10)
+    header 'Accept', 'application/json'
+    cookie 'session', sessionId
+    timeout Duration.ofSeconds(30)
 }
+
+client.postSync('/users', null) { json([name: 'Alice', email: 'alice@example.com']) }
+client.postSync('/login', null) { form(username: 'alice', password: secret) }
+client.putSync('/users/123', null) { body(user, 'application/json') }
+client.deleteSync('/users/123')
+```
+
+Requests and responses are encoded and parsed by a **codec registry**:
+
+```groovy
+client.postSync('/report', null) { body(rows, 'text/csv') }      // List<Map> -> CSV with a header row
+
+def r = client.getSync('/orders/42')
+r.parsed                     // Map/List for JSON, GPathResult for XML, List<Map> for CSV, String for text
+Order o = r.bodyAs(Order)    // or: r as Order
+
+Order typed = client.getSync(Order, '/orders/42')                 // typed verbs
+CompletableFuture<Order> later = client.get(Order, '/orders/42')
+```
+
+Add your own codecs, or use Jackson (picked up automatically when `jackson-databind` 2.x is on the classpath):
+
+```groovy
+def client = GroovyHttpClient.builder(url).codecs {
+    parser 'application/vnd.tmf+json', { String text, MediaType type, Class target -> tmf.read(text, target) }
+    encoder 'text/tab-separated-values', { rows -> rows*.join('\t').join('\n') }
+    // jackson(myObjectMapper)
+}.build()
 ```
 
 ---
 
-## 🎯 Core Capabilities
+## Responses and errors
 
-### HTTP Methods
+A status of 400 or above is raised as `HttpResponseException` after retries. Its message is safe to log: status, reason, method, the URI without its query string, size and content type, and no body unless you opt in with `errorBodyPreviewChars`.
 
 ```groovy
-import java.util.concurrent.CompletableFuture
-
-// Synchronous requests
-def response = client.getSync("/resource")
-def response = client.postSync("/resource", body)
-def response = client.putSync("/resource", body)
-def response = client.patchSync("/resource", body)
-def response = client.deleteSync("/resource")
-
-// Asynchronous requests
-CompletableFuture res = client . get("/resource").thenApply { response ->
-    println response.json
+try {
+    client.postSync('/orders', null) { body(order, 'application/json') }
+} catch (GroovyHttpClient.HttpResponseException e) {
+    log.warn(e.message)       // HTTP 422 Unprocessable Content (POST https://api.example.com/orders, 87 bytes, application/problem+json)
+    e.statusCode
+    e.responseBody
+    e.header('X-Trace-Id')
+    e.bodyAs(ValidationErrors)
+    e.problem?.detail         // RFC 9457 application/problem+json
 }
 ```
 
-### Request Configuration
+**Response handlers** turn outcomes into values:
 
 ```groovy
-def response = client.getSync("/api/users") {
-    // Query parameters
-    query(
-        page: 1,
-        per_page: 50,
-        status: ["active", "pending"]
-    )
-    
-    // Headers
-    header "Authorization", "Bearer ${token}"
-    header "Accept", "application/json"
-    
-    // Timeout for this request
-    timeout(Duration.ofSeconds(5))
-}
-```
-
-### Multipart Uploads
-
-**DSL Style:**
-```groovy
-def response = client.postMultipartSync("/upload") {
-    part {
-        name "document"
-        filename "report.pdf"
-        contentType "application/pdf"
-        data fileBytes
+Order order = client.getSync(Order, '/orders/42') {
+    response {
+        success   { r -> r.bodyAs(Order) }
+        when(404) { r -> null }
+        when(500..599) { r -> cachedOrder() }
+        exception { Throwable t -> cachedOrder() }
     }
-    
-    part {
-        name "metadata"
-        contentType "application/json"
-        content '{"title": "Q4 Report"}'
+}
+```
+
+A body over `maxResponseBytes` raises `ResponseTooLargeException` (a subclass of `HttpResponseException`, status 413).
+
+---
+
+## Streaming
+
+```groovy
+// Download to a file: written to a temp file and moved into place only when complete
+StreamResult r = client.downloadSync('/exports/2026-10.csv', Path.of('2026-10.csv'))
+client.downloadSync('/report.pdf', outputStream)                     // or into your stream
+
+// Small files can still be read into memory
+byte[] bytes = client.downloadBytesSync('/files/logo.png')
+
+// Lines, NDJSON and Server-Sent Events, delivered as they arrive
+client.linesSync('/logs/tail') { String line -> println line }
+client.ndjsonSync('/feed') { Map record -> store(record) }
+client.sseSync('/events') { SseEvent e, StreamControl c ->
+    if (e.event == 'done') c.stop() else handle(e.data)
+}
+
+// Any verb can stream: e.g. an LLM-style POST that answers with SSE
+client.postSync(StreamResult, '/v1/chat', JsonOutput.toJson(prompt)) {
+    header 'Content-Type', 'application/json'
+    sse { SseEvent e -> print e.data }
+}
+
+// Uploads from a file (replayable), a stream or a publisher (one-shot)
+client.putSync('/files/42', null) { body Path.of('big.bin') }
+client.postSync('/ingest', null) { body inputStream, 'application/x-ndjson' }
+```
+
+Each line or event is bounded by `maxStreamItemBytes` (1 MiB by default); for long-lived streams, raise `maxResponseBytes` per request and set an `idleTimeout`. A one-shot upload is never retried, and a 307/308 redirect that would need it re-sent is refused.
+
+---
+
+## Compression
+
+```groovy
+def client = GroovyHttpClient.builder(url).compression(true).build()   // Accept-Encoding: gzip, deflate
+
+client.postSync('/ingest', null) { body(records, 'application/json'); gzipBody() }   // compress a request body
+```
+
+The size limit counts decompressed bytes, so a small compressed body cannot inflate past it. Decoded responses report `r.decoded` and `r.contentEncoding`.
+
+---
+
+## Authentication
+
+```groovy
+builder(url).auth { basic 'svc-user', secret }
+builder(url).auth { bearer { -> vault.read('token') } }          // supplier, asked on every attempt
+builder(url).auth { apiKey header: 'X-API-Key', value: key }
+builder(url).auth {
+    oauth2 {
+        tokenUrl 'https://login.example.com/oauth2/token'
+        clientId 'orders-service'
+        clientSecret secret
+        scope 'orders.read'
     }
-    
-    header "Authorization", "Bearer ${token}"
+}
+
+client.getSync('/admin') { auth { bearer adminToken } }   // per request
+client.getSync('/health') { noAuth() }
+```
+
+Credentials go only to the base URL's origin (add others with `authHosts`) and are removed on cross-origin redirects. OAuth2 tokens are cached, fetched once for concurrent callers, and refreshed once on a 401.
+
+---
+
+## Proxies
+
+```groovy
+GroovyHttpClient.builder(url)
+        .proxy('proxy.corp.example', 3128)
+        .proxyAuth('svc-user', proxyPassword)
+        .nonProxyHosts('*.internal', 'localhost')
+        .build()
+```
+
+Without these the JVM's proxy settings apply, as before; `noProxy()` connects directly.
+
+- **HTTPS targets behind a Basic-auth proxy**: the JDK removes Basic credentials from `CONNECT` by default. Start the JVM with `-Djdk.http.auth.tunneling.disabledSchemes=""`. Without it the request fails with an `AuthenticationException` that says so.
+- **SOCKS is not supported**: the JDK `HttpClient` ignores SOCKS proxies and connects directly, so a SOCKS proxy is refused at build time, and a warning is logged if the JVM's own settings select one.
+
+---
+
+## Security configuration
+
+```groovy
+new GroovyHttpClient(SecurityConfig.production('https://api.example.com'))
+new GroovyHttpClient(SecurityConfig.staging('https://staging.example.com'))
+new GroovyHttpClient(SecurityConfig.testing('https://localhost:8443'))   // verifies TLS; short timeouts, retries, logging
+
+def config = SecurityConfig.production('https://api.example.com').withOverrides(
+        maxResponseBytes: 5_000_000L,
+        allowedHosts: ['api.example.com', 'cdn.example.com'] as Set,
+        trustStore: corporateCaStore)
+```
+
+Unknown settings are refused, so a misspelt security setting fails at once. `SecurityConfig.trustAll(url)` accepts any certificate and is for local debugging only. For certificates, trust stores and mutual TLS see the [SSL certificate guide](SSL_CERTIFICATE_GUIDE.md).
+
+---
+
+## Resilience
+
+```groovy
+def client = GroovyHttpClient.builder(url)
+        .failureThreshold(5)            // circuit breaker opens after 5 failures
+        .resetTimeoutMs(30_000)         // then lets a single probe through after 30 s
+        .build()
+
+client.getSync('/orders') {
+    retry { maxAttempts 3; backoffExponential(200, 2_000, true); on5xx(true) }
+}
+
+client.addInterceptor { ctx, next ->
+    long t = System.nanoTime()
+    next.call(ctx).thenApply { resp -> metrics.record(ctx.method, resp.statusCode, System.nanoTime() - t); resp }
 }
 ```
 
-**Static API Style:**
-```groovy
-import org.softwood.http.MultipartPart
+POST and PATCH are retried only with `retryNonIdempotent(true)`. While the breaker is open, requests fail at once with `CircuitOpenException`.
 
-def parts = [
-    MultipartPart.bytes("file", "doc.pdf", "application/pdf", fileBytes),
-    MultipartPart.json("metadata", [title: "Q4 Report"]),
-    MultipartPart.text("description", "Financial report")
-]
+---
 
-def response = client.postMultipartSync("/upload", parts)
-```
-
-### File Downloads
+## HTTP/3
 
 ```groovy
-// Download as bytes
-byte[] fileData = client.downloadBytesSync("/files/document.pdf") {
-    header "Authorization", "Bearer ${token}"
-}
-
-// Save to disk
-new File("downloaded.pdf").bytes = fileData
+def client = GroovyHttpClient.builder('https://api.example.com').http3().build()   // JDK 26+; HTTP/2 otherwise
+client.getSync('/data').httpVersion   // HTTP_3 when QUIC was negotiated
 ```
 
 ---
 
-## 🔒 Security Configuration
+## Testing your code
 
-### Environment Profiles
-
-```groovy
-import org.softwood.http.SecurityConfig
-import org.softwood.http.GroovyHttpClient
-
-// Defaults - what new GroovyHttpClient(url) uses: verified TLS, no absolute URLs, no retries
-def defaults = SecurityConfig.defaults("https://api.example.com")
-
-// Production - TLS 1.3 only, tighter timeouts, retries of idempotent requests
-def prod = SecurityConfig.production("https://api.example.com")
-
-// Staging - production plus request logging
-def staging = SecurityConfig.staging("https://staging-api.example.com")
-
-// Testing - local/mock servers: absolute URLs, all cookies; certificates STILL verified
-def test = SecurityConfig.testing("http://localhost:8080")
-
-// Trust-all - disables certificate checks. Local debugging only.
-def unsafe = SecurityConfig.trustAll("https://localhost:8443")
-
-def client = new GroovyHttpClient(prod)
-```
-
-### Custom Configuration
-
-```groovy
-import org.softwood.http.GroovyHttpClient.RetryPolicy
-
-def config = SecurityConfig.production("https://api.example.com")
-    .withOverrides([
-        // Timeouts
-        connectTimeout: Duration.ofSeconds(5),
-        requestTimeout: Duration.ofSeconds(10),
-        
-        // Circuit Breaker
-        failureThreshold: 5,
-        resetTimeoutMs: 30_000,
-        
-        // SSRF Protection (also applied to every redirect hop)
-        allowedHosts: ["api.example.com", "cdn.example.com"] as Set,
-        allowAbsoluteUrls: false,
-        maxRedirects: 3,
-        
-        // TLS
-        allowedTlsProtocols: ["TLSv1.3"],
-        enforceHostnameVerification: true,
-        
-        // Retry Policy (idempotent methods; add retryNonIdempotent(true) for POST/PATCH)
-        retryPolicy: new RetryPolicy.Config().tap {
-            maxAttempts(3)
-            backoffExponential(200, 2000, true)
-            on5xx(true)
-        }.build()
-    ])
-
-def client = new GroovyHttpClient(config)
-```
-
----
-
-## 🧪 Testing Framework
-
-### MockHttpServer
+The test fixtures give you a real HTTP server for your tests:
 
 ```groovy
 import org.softwood.test.MockHttpServer
-import spock.lang.Specification
 
-class ApiClientSpec extends Specification {
-    
-    MockHttpServer server
-    ApiClient client
-    
-    def setup() {
-        server = new MockHttpServer()
-        server.init()
-        client = new ApiClient("http://localhost:${server.port}")
-    }
-    
-    def cleanup() {
-        server.shutdown()
-    }
-    
-    def "should fetch user data"() {
-        given:
-        server.addRequestCheck("GET", "/users/123", 200)
-            .withResponseBody('{"id": 123, "name": "Alice"}')
-        
-        when:
-        def user = client.getUser(123)
-        
-        then:
-        user.id == 123
-        user.name == "Alice"
-    }
-}
+def server = new MockHttpServer()
+server.init()
+def check = server.addRequestCheck('POST', '/orders', 201)
+        .withResponseBody('{"id":42}')
+        .withResponseHeaders(['Content-Type': 'application/json'])
+
+def client = new GroovyHttpClient(SecurityConfig.testing("http://localhost:${server.port}"))
+client.postSync('/orders', null) { json([sku: 'A1']) }
+
+assert check.lastRequest.header('Content-Type').startsWith('application/json')
+assert check.lastRequest.bodyText == '{"sku":"A1"}'
+server.shutdown()
 ```
 
-### HttpClientTestDsl
-
-```groovy
-import org.softwood.http.HttpClientTestDsl
-import spock.lang.Specification
-
-class UserServiceSpec extends Specification {
-    
-    HttpClientTestDsl testDsl
-    UserService service
-    
-    def setup() {
-        testDsl = HttpClientTestDsl.create()
-        testDsl.start()
-        service = new UserService(testDsl.baseUrl)
-    }
-    
-    def cleanup() {
-        testDsl.stop()
-    }
-    
-    def "should create user"() {
-        given: "mock endpoint"
-        testDsl.when("/users").respondWith {
-            status 201
-            json([id: 456, name: "Bob"])
-        }
-        
-        when: "creating user"
-        def user = service.createUser("Bob", "bob@example.com")
-        
-        then: "user is created"
-        user.id == 456
-        
-        and: "request was correct"
-        testDsl.verify("/users") {
-            wasCalled(1)
-            withMethod("POST")
-            withHeader("Content-Type", "application/json")
-            withJsonBody { json ->
-                json.name == "Bob" &&
-                json.email == "bob@example.com"
-            }
-        }
-    }
-}
-```
-
-### HttpClientTestTrait
-
-```groovy
-import org.softwood.http.HttpClientTestTrait
-import spock.lang.Specification
-
-class ProductServiceSpec extends Specification implements HttpClientTestTrait {
-    
-    ProductService service
-    
-    def setup() {
-        service = new ProductService(testServerBaseUrl)
-    }
-    
-    def "should list products"() {
-        given:
-        mockEndpoint("/products").respondWith {
-            status 200
-            json([
-                [id: 1, name: "Widget"],
-                [id: 2, name: "Gadget"]
-            ])
-        }
-        
-        when:
-        def products = service.listProducts()
-        
-        then:
-        products.size() == 2
-        verifyEndpoint("/products").wasCalled(1)
-    }
-}
-```
+`HttpClientTestDsl` adds a fluent endpoint and verification DSL, and `HttpClientTestTrait` brings both into a Spock specification. The fixtures are incubating: their API may change before 3.0.
 
 ---
 
-## 🛡️ Resilience Patterns
+## Upgrading
 
-### Circuit Breaker
+**From 2.0 to 2.1**, check:
 
-```groovy
-import org.softwood.http.SecurityConfig
-import org.softwood.http.GroovyHttpClient
+- `HttpResponseException.message` no longer contains the response body. Read `responseBody`, `bodyAs(...)` or `problem`, or set `errorBodyPreviewChars`.
+- The client's own size limit raises `ResponseTooLargeException` (still an `HttpResponseException` with status 413).
+- Query values are encoded once: `&`, `=`, `/`, `?` and non-ASCII values now arrive intact.
+- `addCookie` sends RFC 6265 cookies (no `$Version`).
+- Multipart text and JSON parts (`MultipartPart.text/json`, DSL `content`) are sent as plain form fields, without a generated filename.
 
-// Configure circuit breaker
-def config = SecurityConfig.production("https://api.example.com")
-    .withOverrides([
-        failureThreshold: 5,      // Open after 5 failures
-        resetTimeoutMs: 30_000    // Try recovery after 30 seconds
-    ])
+Fixed 2.0 bugs: an unknown name inside a request closure (for example your own constant) sent a stray `GET /<name>`; an oversized body on HTTP/2 or HTTP/3 surfaced as a retryable `IOException`; `@CompileStatic` callers could not use the request DSL.
 
-def client = new GroovyHttpClient(config)
-
-try {
-    def response = client.getSync("/data")
-} catch (GroovyHttpClient.CircuitOpenException e) {
-    println "Service unavailable - circuit is open"
-    // Fallback to cache or alternative
-}
-```
-
-### Retry Policy
-
-```groovy
-import org.softwood.http.GroovyHttpClient.RetryPolicy
-import org.softwood.http.SecurityConfig
-
-def retryPolicy = new RetryPolicy.Config().tap {
-    maxAttempts(5)
-    backoffExponential(200, 10_000, true)  // 200ms to 10s with jitter
-    onTimeouts(true)
-    on5xx(true)
-    onIoExceptions(true)
-}.build()
-
-def config = SecurityConfig.production("https://api.example.com")
-    .withOverrides([retryPolicy: retryPolicy])
-
-def client = new GroovyHttpClient(config)
-
-// GET is retried automatically; POST/PATCH only if the policy says retryNonIdempotent(true)
-def response = client.getSync("/flaky-endpoint")
-```
-
-### Request Interceptors
-
-```groovy
-// Add logging interceptor
-client.addInterceptor { ctx, next ->
-    def start = System.currentTimeMillis()
-    println "[${ctx.method}] ${ctx.uri}"
-    
-    next.call(ctx).whenComplete { response, error ->
-        def elapsed = System.currentTimeMillis() - start
-        if (error) {
-            println "✗ Failed after ${elapsed}ms: ${error.message}"
-        } else {
-            println "✓ ${response.statusCode} in ${elapsed}ms"   // 4xx/5xx arrive here as responses
-        }
-    }
-}
-
-// Authentication: a default header is simplest (dropped automatically on cross-origin redirects)
-client.setHeader("Authorization", "Bearer ${getToken()}")
-```
+**From 1.x**: 2.0 changed several security-relevant defaults (certificate verification, redirect checks, retries, exception types). Read the upgrade chapter in the documentation first.
 
 ---
 
-## ⚡ Virtual Threads
+## Documentation
 
-Built on **virtual threads** for efficient, scalable concurrency:
-
-```groovy
-// Launch thousands of concurrent requests
-def futures = (1..10_000).collect { id ->
-    client.get("/users/${id}").thenApply { it.json }
-}
-
-// Wait for all to complete
-def users = CompletableFuture.allOf(*futures).thenApply {
-    futures.collect { it.join() }
-}.get()
-
-println "Fetched ${users.size()} users concurrently"
-```
-
-Virtual threads enable:
-- **Millions of concurrent requests** without thread pool exhaustion
-- **Simple synchronous code** without blocking platform threads
-- **Automatic scaling** — no manual thread pool tuning required
-
----
-
-## 📚 Documentation
-
-Comprehensive documentation is available in the `docs/` directory:
-
-- **[Introduction](docs/chapters/01-introduction.adoc)** — Overview and getting started
-- **[Architecture](docs/chapters/02-architecture.adoc)** — Virtual threads and design patterns
-- **[Security Configuration](docs/chapters/03-security-config.adoc)** — Environment profiles and security controls
-- **[URL Builder](docs/chapters/04-url-builder.adoc)** — Constructing complex URLs
-- **[GroovyHttpClient](docs/chapters/05-groovy-http-client.adoc)** — Core client usage
-- **[Multipart Uploads](docs/chapters/06-multipart-uploads.adoc)** — File uploads and multipart forms
-- **[Circuit Breaker](docs/chapters/07-circuit-breaker.adoc)** — Resilience and failure handling
-- **[Testing Framework](docs/chapters/08-testing-mock-server.adoc)** — MockHttpServer guide
-- **[Testing DSL](docs/chapters/09-testing-dsl.adoc)** — HttpClientTestDsl reference
-- **[Testing Trait](docs/chapters/10-testing-trait.adoc)** — Spock integration
-- **[Examples](docs/chapters/11-examples.adoc)** — Real-world usage patterns
-
-### Building Documentation
+The user guide is [`docs/groovy-httpclient-user-guide.pdf`](docs/groovy-httpclient-user-guide.pdf) (also as [`.docx`](docs/groovy-httpclient-user-guide.docx)); its source is [`docs/index.adoc`](docs/index.adoc). The Groovydoc is published as the `-javadoc` artifact, or run `./gradlew groovydoc`.
 
 ```bash
-# Generate HTML documentation
-./gradlew asciidoctor
-
-# Generate PDF documentation
-./gradlew asciidoctorPdf
-
-# Output: build/docs/html5/index.html
-# Output: build/docs/pdf/index.pdf
+./gradlew asciidoctor       # HTML: build/docs/html5/index.html
+./gradlew asciidoctorPdf    # PDF:  build/docs/pdf/groovy-httpclient-user-guide.pdf
 ```
 
 ---
 
-## 🧩 Requirements
-
-| Component | Version |
-|-----------|---------|
-| **Java** | 21 or higher (for virtual threads) |
-| **Groovy** | 5.0 or higher |
-| **Build Tool** | Gradle 8+ or Maven 3.8+ |
-
-> **Note:** 2.0 requires Java 25+. It is built and tested on JDK 25 and JDK 27.
-
----
-
-## 🏗️ Architecture Highlights
-
-### Virtual Thread Executor
-
-```groovy
-// Custom executor using virtual threads
-private ExecutorService createVirtualThreadExecutor() {
-    def factory = Thread.ofVirtual()
-        .name("http-client-", 0)
-        .factory()
-    
-    return Executors.newThreadPerTaskExecutor(factory)
-}
-```
-
-### Circuit Breaker States
-
-```
-CLOSED (normal operation)
-   ↓ (failureThreshold exceeded)
-OPEN (fail-fast, reject requests)
-   ↓ (resetTimeout elapsed)
-HALF_OPEN (probe with single request)
-   ↓ (success)           ↓ (failure)
-CLOSED                  OPEN
-```
-
-### Request Processing Pipeline
-
-```
-Request → Interceptors → Circuit Breaker → Retry Policy → HttpClient → Response
-```
-
----
-
-## 🧪 Testing
-
-### Run All Tests
+## Building and testing
 
 ```bash
-./gradlew test
+./gradlew build                                   # compile, unit and integration tests, jars
+./gradlew releaseGate --rerun-tasks               # everything on JDK 27 and 25, feature gate, consumer smoke build
+./gradlew test --tests '*CompressionSpec*'        # one spec
 ```
 
-### Run Specific Test Suite
-
-```bash
-# Client tests
-./gradlew test --tests "org.softwood.http.clientTests.*"
-
-# Testing framework tests
-./gradlew test --tests "org.softwood.http.testingFrameworkTests.*"
-
-# Specific test class
-./gradlew test --tests GroovyHttpClientSpec
-```
-
-### Test Coverage
-
-```bash
-# Generate coverage report
-./gradlew test jacocoTestReport
-
-# Open build/reports/jacoco/test/html/index.html
-```
-
-### Test Examples Location
-
-All test examples are in `src/test/groovy/org/softwood/http/`:
-
-```
-clientTests/
-├── GroovyHttpClientSpec.groovy          # Core client functionality
-├── GroovyHttpClientMultipartSpec.groovy # Multipart uploads
-├── CircuitBreakerSpec.groovy            # Circuit breaker behavior
-└── RetryPolicySpec.groovy               # Retry logic
-
-testingFrameworkTests/
-├── HttpClientTestDslSpec.groovy         # Test DSL
-├── MockHttpServerSpec.groovy            # Mock server
-└── HttpClientTestTraitSpec.groovy       # Spock trait
-```
+The unit specs use `MockHttpServer`; the integration specs run every feature against a real Jetty server over HTTP/1.1, HTTP/2 and HTTP/3. `releaseGate` checks that every catalogued feature has both, on both JDKs, and that a separate build can consume the published library and fixtures.
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Write tests for your changes
-4. Ensure all tests pass (`./gradlew test`)
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to the branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
+Issues and pull requests are welcome at [github.com/woodmawa/groovy-HttpClient](https://github.com/woodmawa/groovy-HttpClient). Please include a spec for any change; `./gradlew releaseGate --rerun-tasks` must pass.
 
 ---
 
-## 📝 License
+## License
 
-This project is licensed under the **Apache License 2.0** - see the [LICENSE](LICENSE) file for details.
-
-```
-Copyright 2025 William Woodman
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
+Copyright 2025 Softwood Consulting Ltd. Licensed under the [Apache License, Version 2.0](LICENSE).
 
 ---
 
-## 🙏 Acknowledgments
+## Support
 
-- Built on Java's standard `HttpClient` API ([JEP 321](https://openjdk.org/jeps/321))
-- Virtual threads from Project Loom ([JEP 444](https://openjdk.org/jeps/444))
-- Inspired by modern HTTP client libraries across languages
-- Groovy community for language support and feedback
-
----
-
-## 📞 Support
-
-- **Documentation**: See `docs/` directory or build with `./gradlew asciidoctor`
 - **Issues**: [GitHub Issues](https://github.com/woodmawa/groovy-HttpClient/issues)
 - **Email**: will.woodman.softwood@outlook.com
-- **Source**: [GitHub Repository](https://github.com/woodmawa/groovy-HttpClient)
-
----
-
-**Made with ❤️ by William Woodman**

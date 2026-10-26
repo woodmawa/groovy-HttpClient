@@ -1,0 +1,35 @@
+[[api-map]]
+== API Map and Licence
+
+=== Classes you use
+
+[cols="2,5"]
+|===
+|`org.softwood.http.GroovyHttpClient` |The client and its verbs. Nested: `Builder`, `GroovyRequestBuilder` (the request DSL), `HttpClientResponse`, `RetryPolicy`, and the exceptions `HttpResponseException`, `ResponseTooLargeException`, `CircuitOpenException`, `RedirectRejectedException`, `ContentParseException`
+|`SecurityConfig` |All client settings and the profiles
+|`ResponseHandlers` |The `response { }` DSL
+|`ProblemDetail` |RFC 9457 problem details
+|`StreamResult`, `StreamControl`, `SseEvent` |Streaming results and control
+|`ClientMetrics` (and `ClientMetrics.Snapshot`) |Per-client counters: `client.metrics`
+|`CircuitBreakerStatus`, `GroovyHttpClient.State` |Circuit breaker inspection: `client.circuitBreakerStatus`, `client.circuitState`
+|`MultipartPart` |Multipart parts
+|`HttpVersion`, `Http3Discovery` |Protocol preferences
+|`ContentDecodingException`, `StreamItemTooLargeException`, `AuthenticationException` |Other exceptions (<<exception-catalogue>>)
+|`org.softwood.http.codec.CodecRegistry`, `MediaType`, `Encoder`, `Parser`, `CodecProvider` |Codecs
+|`org.softwood.http.auth.AuthPolicy`, `OAuth2ClientCredentials` |The `auth { }` DSL and its schemes
+|`org.softwood.url.URLBuilder` |URL building
+|`org.softwood.test.MockHttpServer`, `org.softwood.http.HttpClientTestDsl`, `HttpClientTestTrait` |Test fixtures (incubating)
+|===
+
+Classes in `org.softwood.http.compression`, `.streaming` and `.proxy` are internal and may change in any release.
+
+The complete API is in the Groovydoc, published as the `-javadoc` artifact; run `./gradlew groovydoc` to build it locally.
+
+=== Getting help
+
+* Source and issues: https://github.com/woodmawa/groovy-HttpClient
+* Email: will.woodman.softwood@outlook.com
+
+=== Licence
+
+Copyright 2025 Softwood Consulting Ltd. Licensed under the Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0). Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.

@@ -1,0 +1,137 @@
+[[rest-patterns]]
+== REST API Patterns
+
+Three things almost every real API makes you deal with: collections that come back a page at a time, filters and sorting expressed in the URL, and versions. None needs special support in the client -- each is a small pattern built from `query`, `header` and the response accessors -- but it is worth getting them right once.
+
+[[pagination]]
+=== Pagination
+
+APIs page collections in one of four ways. Find out which yours uses, then use the matching loop. Each example collects every item; in practice, stop as soon as you have what you need.
+
+*Page number and size* (`?page=2&size=50`):
+
+[source,groovy]
+----
+List<Map> all = []
+int page = 1
+while (true) {
+    def items = client.getSync('/orders') { query(page: page, size: 50) }.json.items
+    all.addAll(items)
+    if (items.size() < 50) break               // a short page is the last page
+    page++
+}
+----
+
+*Offset and limit* (`?offset=100&limit=50`), often with a total:
+
+[source,groovy]
+----
+int offset = 0
+def first = client.getSync('/orders') { query(offset: 0, limit: 50) }.json
+List<Map> all = new ArrayList<>(first.items)
+int total = first.total
+for (offset = 50; offset < total; offset += 50) {
+    all.addAll(client.getSync('/orders') { query(offset: offset, limit: 50) }.json.items)
+}
+----
+
+*Cursor or continuation token* (the response says where to continue):
+
+[source,groovy]
+----
+List<Map> all = []
+String cursor = null
+do {
+    def page = client.getSync('/orders') {
+        query(limit: 100)
+        if (cursor) query(cursor: cursor)
+    }.json
+    all.addAll(page.items)
+    cursor = page.nextCursor
+} while (cursor)
+----
+
+*`Link` header* (RFC 8288, as used by GitHub and many others): the next page's URL is in a response header. That URL is absolute, so the client must allow absolute URLs to its own host:
+
+[source,groovy]
+----
+def gh = GroovyHttpClient.builder('https://api.github.com')
+        .allowAbsoluteUrls(true)                               // allowedHosts stays [api.github.com]
+        .build()
+
+String nextLink(String header) {
+    header?.split(',')?.find { it.contains('rel="next"') }?.with { it.substring(it.indexOf('<') + 1, it.indexOf('>')) }
+}
+
+List<Map> repos = []
+String url = '/orgs/apache/repos?per_page=100'
+while (url) {
+    def r = gh.getSync(url)
+    repos.addAll(r.json)
+    url = nextLink(r.getHeader('Link'))
+}
+----
+
+TIP: To process items as they arrive rather than collect them all, wrap the loop in a method that takes a closure, or use the asynchronous verbs to fetch the next page while you process the current one. For very large exports, prefer an endpoint that streams NDJSON (<<event-streams>>) over thousands of pages.
+
+[[filtering]]
+=== Filtering and sorting
+
+Filters and sort orders are query parameters; the only care needed is encoding, which `query(...)` does for you:
+
+[source,groovy]
+----
+def r = client.getSync('/orders') {
+    query(status: ['open', 'held'])                    // ?status=open&status=held
+    query(customer: 'Smith & Sons')                    // & encoded, not a separator
+    query(createdAfter: '2026-10-01T00:00:00Z')        // ':' encoded
+    query(sort: '-createdAt,total')                    // the API's own syntax, passed as a value
+    query(fields: 'id,status,total')                   // sparse field sets
+}
+----
+
+Some APIs take a filter expression (`?filter=status==open;total>100` in RSQL, or `?$filter=` in OData). Build the expression as a string and pass it as one value; `query` encodes the operators so they survive the trip:
+
+[source,groovy]
+----
+String filter = "status==open;total=gt=${minTotal}"
+client.getSync('/orders') { query(filter: filter) }
+----
+
+When filters are optional, build the query with ordinary Groovy (see <<dsl>>):
+
+[source,groovy]
+----
+client.getSync('/orders') {
+    criteria.findAll { k, v -> v != null }.each { k, v -> query((k): v) }
+}
+----
+
+[[versioning]]
+=== API versions
+
+APIs carry their version in one of four places. Each maps onto a client feature:
+
+[cols="2,3,4"]
+|===
+|Where |Example |With this client
+
+|Path |`/v2/orders` |Put the version in the base URL: `builder('https://api.example.com/v2')`. Every path is appended to it.
+|Header |`API-Version: 2026-10-01` |A default header: `client.setHeader('API-Version', '2026-10-01')`.
+|Media type |`Accept: application/vnd.acme.v2+json` |A default `Accept` header. The `{plus}json` suffix means the built-in JSON codec parses it with no extra set-up.
+|Query |`?api-version=2026-10-01` |`query('api-version': ...)` per request, or an interceptor if every request needs it.
+|===
+
+[source,groovy]
+----
+// Path versioning: one client per major version you use
+def v1 = GroovyHttpClient.builder('https://api.example.com/v1').build()
+def v2 = GroovyHttpClient.builder('https://api.example.com/v2').build()
+
+// Media-type versioning
+def acme = GroovyHttpClient.builder('https://api.acme.example').build()
+acme.setHeader('Accept', 'application/vnd.acme.v2+json')
+assert acme.getSync('/orders/42').json.id == 42           // parsed as JSON via the +json suffix
+----
+
+Migrating between versions: create a client per version and move calls across one at a time. Because the version lives in the client, the request code itself does not change.

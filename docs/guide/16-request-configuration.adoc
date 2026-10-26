@@ -1,0 +1,151 @@
+[[request-configuration]]
+== Request Configuration
+
+Everything you can put in a request closure, grouped by purpose. Request settings describe *this* request: what to send, and anything that differs from the client's defaults. Where a request setting has a client counterpart, the request's value wins for that request only.
+
+[[request-uri]]
+=== URI and query
+
+*Controls:* which resource, and which subset of it. *Use it for* identifiers in the path, and filters, sorting and paging in the query (<<rest-patterns>>).
+
+[cols="2,4"]
+|===
+|`query(Map)` |Add query parameters, URL-encoded; a list value repeats the parameter
+|===
+
+The path is the verb's first argument. A path may carry its own query string, and with `allowAbsoluteUrls` it may be a full URL.
+
+[[request-headers]]
+=== Headers
+
+*Controls:* request metadata. *Use it for* content negotiation (`Accept`), conditional requests (`If-None-Match`), tracing ids and per-request API versions. Not for credentials: use `auth { }`.
+
+[cols="2,4"]
+|===
+|`header(name, value)` |Add a value (default headers are kept)
+|`setHeader(name, value)` |Replace every value of the header, default headers included
+|===
+
+[[request-cookies]]
+=== Cookies
+
+*Controls:* cookies for this request only; they are not stored. *Use it for* values that vary per request. Session cookies are handled for you (<<cookies>>).
+
+[cols="2,4"]
+|===
+|`cookie(name, value)` |Send a cookie with this request
+|`cookies(Map)` |Several at once
+|===
+
+[[request-content]]
+=== Content
+
+*Controls:* the request body and its `Content-Type`. *Use* `json` for most APIs, `form` for form endpoints, `body(value, type)` for other formats, and the streaming forms for large uploads (<<sending-data>>).
+
+[cols="2,4"]
+|===
+|`json(value)` |JSON body; maps, lists and objects are serialised, strings sent as is
+|`form(Map)` |URL-encoded form body
+|`body(value, contentType)` |Encoded by the codec for the type (CSV, XML, your own...)
+|`body(value)` |Type from the value: `byte[]` octet-stream, text plain, anything else JSON
+|`body(Path)` / `body(File)` |Stream a file (<<uploads>>)
+|`body(InputStream, type)` / `body(Flow.Publisher, type)` |Stream a one-shot body
+|`gzipBody()` |Compress the body as it is sent (<<compression>>)
+|===
+
+[[request-multipart]]
+=== Multipart
+
+*Controls:* `multipart/form-data` uploads of files and fields together.
+
+Multipart bodies are built with `postMultipart` / `postMultipartSync` (<<multipart>>). With a list of parts, the closure is a normal request closure.
+
+[[request-auth]]
+=== Authentication
+
+*Controls:* credentials for this request. *Use it for* a call that needs different credentials (an admin token) or none at all (a public health check).
+
+[cols="2,4"]
+|===
+|`auth { ... }` |Credentials for this request, replacing the client's (<<authentication>>)
+|`noAuth()` |No credentials for this request
+|===
+
+[[request-compression]]
+=== Compression
+
+*Controls:* whether this response may arrive compressed, and whether this request body is sent compressed. *Use it for* one large transfer on a client that otherwise does not compress, or the reverse.
+
+[cols="2,4"]
+|===
+|`compression(boolean)` |Accept compressed responses for this request, overriding the client
+|`gzipBody()` |Send the body gzip-compressed
+|===
+
+[[request-timeouts]]
+=== Timeouts
+
+*Controls:* how long this request may take. *Use it for* the one slow endpoint (a report, an export) on a client whose timeout suits everything else, and `idleTimeout` for streams that should fail when they go quiet.
+
+[cols="2,4"]
+|===
+|`timeout(Duration)` |Request timeout for this request (until the response headers)
+|`idleTimeout(Duration)` |Fail if the body delivers no bytes for this long
+|===
+
+[[request-retry]]
+=== Retry
+
+*Controls:* the retry policy for this request, replacing the client's. *Use it for* an idempotent call you want retried harder, or a call you must not retry at all (`maxAttempts 1`).
+
+[source,groovy]
+----
+client.getSync('/flaky') {
+    retry {
+        maxAttempts 4
+        backoffExponential(200, 2_000, true)
+        on5xx(true)
+    }
+}
+----
+
+The options are the same as for a client retry policy (<<resilience>>).
+
+[[request-protocol]]
+=== Protocol
+
+*Controls:* the HTTP version for this request. Rarely needed: set it on the client.
+
+[cols="2,4"]
+|===
+|`httpVersion(HttpVersion)` |Prefer a version for this request
+|`http3()` / `http3(Http3Discovery)` |Use HTTP/3 for this request
+|`version(HttpClient.Version)` |The same with the JDK enum
+|`expectContinue(boolean)` |Send `Expect: 100-continue`
+|===
+
+[[request-response]]
+=== Response handling
+
+*Controls:* what this call returns for each outcome, and how much it may read. *Use it for* outcomes that are normal answers here (a 404 on a lookup), and the occasional large response.
+
+[cols="2,4"]
+|===
+|`response { ... }` |Handlers for this request (<<response-handlers>>)
+|`maxResponseBytes(long)` |Size limit for this request
+|===
+
+[[request-streaming]]
+=== Streaming targets
+
+*Controls:* where the response body goes instead of memory. *Use it for* any verb whose answer is a file or a stream -- typically a POST that returns an export or an event stream.
+
+[cols="2,4"]
+|===
+|`downloadTo(Path / File / OutputStream)` |Write a 2xx body there instead of memory
+|`lines { line -> }` |Deliver the body line by line
+|`sse { event -> }` |Deliver Server-Sent Events
+|`ndjson { value -> }` |Deliver parsed NDJSON values
+|===
+
+A request has at most one streaming target. See <<streaming>>.

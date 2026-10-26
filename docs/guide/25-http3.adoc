@@ -1,0 +1,33 @@
+[[http3]]
+== HTTP/3 in Depth
+
+HTTP/3 runs HTTP over QUIC, on UDP. It needs JDK 26 or later (JEP 517), TLS 1.3, and a server that offers it.
+
+[source,groovy]
+----
+def client = GroovyHttpClient.builder('https://cloudflare-quic.com').http3().build()
+println client.getSync('/').httpVersion        // HTTP_2: the server announces HTTP/3 in Alt-Svc
+println client.getSync('/').httpVersion        // HTTP_3 from now on
+
+client.getSync('/') { http3() }                // or for one request
+GroovyHttpClient.isHttp3Available()            // true on JDK 26+
+----
+
+=== Discovery modes
+
+[cols="2,4"]
+|===
+|`Http3Discovery.ANY` (default) |Use HTTP/3 when the JDK knows the server offers it -- some servers from the first request, others once their `Alt-Svc` header has been seen -- and HTTP/2 otherwise
+|`Http3Discovery.ALT_SVC` |Start on HTTP/2 and switch when the server advertises HTTP/3 in `Alt-Svc`
+|`Http3Discovery.HTTP_3_URI_ONLY` |HTTP/3 or fail -- no fallback
+|===
+
+=== Fallback
+
+With `ANY` or `ALT_SVC`, the same code works everywhere:
+
+* On a JDK without HTTP/3, the client logs a warning when it is created and uses HTTP/2 (`HTTP_3_URI_ONLY` fails instead).
+* A server that does not offer HTTP/3, or a network that blocks UDP 443 (common behind corporate firewalls), gives HTTP/2.
+* Through an HTTP proxy, HTTP/3 is not possible; the client uses HTTP/2 (<<proxies>>).
+
+Check `r.httpVersion` to see what was used. To test the network path itself, try `HTTP_3_URI_ONLY` against one of the public endpoints in <<introduction>>.

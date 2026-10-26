@@ -334,12 +334,31 @@ asciidoctorPdf {
 
     attributes = [
             'source-highlighter': 'rouge',
-            'version': project.version,
-            'backend': 'pdf'
+            'version'           : project.version,
+            'backend'           : 'pdf',
+            'pdf-themesdir'     : file('docs/themes').absolutePath,
+            'pdf-theme'         : 'user-guide',          // docs/themes/user-guide-theme.yml: A4, 10pt
+            'revdate'           : new Date().format('yyyy-MM-dd')
     ]
+
+    // The book source is index.adoc, so the PDF came out as index.pdf -- which says nothing once it leaves the build
+    // directory. Renamed on the way out, as in mcp-groovy-context-server and mcp-agentic-workflow.
+    doLast {
+        def outDir = file('build/docs/pdf')
+        def src = new File(outDir, 'index.pdf')
+        def dst = new File(outDir, 'groovy-httpclient-user-guide.pdf')
+        if (src.exists()) {
+            dst.delete()
+            src.renameTo(dst)
+            logger.lifecycle("DOCS: PDF written -> ${dst.absolutePath}")
+        } else {
+            // a silent no-op must not read as success
+            logger.warn("DOCS: expected ${src} was not produced -- PDF NOT renamed")
+        }
+    }
 }
 
-// DocBook output: the source for docs/index.docx (converted with pandoc: docbook -> docx)
+// DocBook output: the source for the .docx edition (converted with pandoc: docbook -> docx)
 tasks.register('asciidoctorDocbook', org.asciidoctor.gradle.jvm.AsciidoctorTask) {
     group = 'documentation'
     description = 'Renders docs/index.adoc to DocBook 5 (input for the .docx edition).'
@@ -353,6 +372,18 @@ tasks.register('asciidoctorDocbook', org.asciidoctor.gradle.jvm.AsciidoctorTask)
         backends = ['docbook']
     }
     attributes = [
-            'version': project.version
+            'version': project.version,
+            'revdate': new Date().format('yyyy-MM-dd')
     ]
+    doLast {
+        def src = file('build/docs/docbook/index.xml')
+        def dst = file('build/docs/docbook/groovy-httpclient-user-guide.xml')
+        if (src.exists()) {
+            dst.delete()
+            src.renameTo(dst)
+            logger.lifecycle("DOCS: DocBook written -> ${dst.absolutePath}")
+        } else {
+            logger.warn("DOCS: expected ${src} was not produced -- DocBook NOT renamed")
+        }
+    }
 }

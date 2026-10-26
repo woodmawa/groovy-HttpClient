@@ -1,0 +1,39 @@
+[[proxies]]
+== Proxies
+
+Without proxy settings, the client uses the JVM's default proxy selector, which follows the standard properties (`https.proxyHost`, `http.nonProxyHosts`...). To set a proxy explicitly:
+
+[source,groovy]
+----
+def client = GroovyHttpClient.builder('https://api.example.com')
+        .proxy('proxy.corp.example', 3128)
+        .proxyAuth('svc-user', proxyPassword)          // optional
+        .nonProxyHosts('*.internal', 'localhost')      // optional
+        .build()
+
+GroovyHttpClient.builder(url).noProxy().build()        // direct, ignoring the JVM settings
+----
+
+For an `https://` target the client tunnels through the proxy with `CONNECT`, and TLS runs end to end with the target. The allowed-hosts check and the redirect policy apply to the target, never to the proxy.
+
+[[proxy-auth]]
+=== Proxy authentication
+
+`proxyAuth` sends Basic credentials in `Proxy-Authorization`, up front, on every request the proxy carries -- never on a request that bypasses it.
+
+[IMPORTANT]
+====
+For `https://` targets the JDK removes Basic proxy credentials from `CONNECT` unless the JVM is started with
+
+----
+-Djdk.http.auth.tunneling.disabledSchemes=""
+----
+
+It is a JVM-wide security setting, so the library leaves it to you. Without it the proxy answers 407 and the request fails with an `AuthenticationException` that says so. Plain `http://` targets are not affected.
+====
+
+[[socks]]
+=== SOCKS and HTTP/3
+
+* *SOCKS is not supported.* The JDK `HttpClient` ignores SOCKS proxies and connects directly, so the client refuses a SOCKS proxy when it is built, and logs a warning (once) if the JVM's own settings select one.
+* *HTTP/3 cannot go through an HTTP proxy* (QUIC is UDP). With a proxy, HTTP/3-only clients are refused and other HTTP/3 settings fall back to HTTP/2.

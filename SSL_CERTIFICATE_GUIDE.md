@@ -13,6 +13,7 @@ Complete guide for creating, managing, and configuring SSL/TLS certificates and 
 - [Importing Certificates](#importing-certificates)
 - [SecurityConfig Integration](#securityconfig-integration)
 - [Production Scenarios](#production-scenarios)
+- [Corporate Proxies and TLS](#corporate-proxies-and-tls)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -27,6 +28,8 @@ GroovyHttpClient supports custom SSL/TLS configurations through Java keystores a
 - **Corporate proxy certificates** — Enterprise SSL inspection
 
 > **Version note (2.0.0):** the `trustStore`, `trustManagers` and `keyManagers` settings used in this guide take effect from **2.0.0**. In 1.x they were silently ignored and the JVM default trust store was used, so private-CA and mutual-TLS configurations shown here did not work. From 2.0.0, `SecurityConfig` also refuses unknown setting names, so a misspelt key fails instead of being ignored. `GroovyHttpClient.builder(url)` offers the same as `.trustStore(ks)`, `.keyManagers(kms)` and `.sslContext(ctx)`. There is no `development()` profile: use `testing()` (verified TLS) with a trust store, or `trustAll()` for throwaway local debugging only.
+
+> **Version note (2.1.0):** the same trust store, key managers and SSL context are used for everything the client connects to: the target API, an explicit HTTPS proxy tunnel, and an OAuth2 token endpoint. 2.1 adds explicit proxy settings; see [Corporate Proxies and TLS](#corporate-proxies-and-tls).
 
 ### Key Concepts
 
@@ -44,23 +47,22 @@ GroovyHttpClient supports custom SSL/TLS configurations through Java keystores a
 
 ### Location
 
-All scripts are located in `resources/ssl-tools/`:
+The scripts are in `src/main/resources/ssl-tools/` in the source repository:
 
 ```
-resources/ssl-tools/
-├── create-keystore.sh          # Linux/Mac keystore creation
-├── create-keystore.bat         # Windows keystore creation
-├── import-certificate.sh       # Linux/Mac certificate import
-├── import-certificate.bat      # Windows certificate import
-├── convert-pem-to-p12.sh      # Convert PEM to PKCS12
-├── convert-pem-to-p12.bat     # Windows PEM conversion
-└── README.txt                  # Quick reference
+src/main/resources/ssl-tools/
+  create_keystore.sh          # Linux/Mac keystore creation
+  create_keystore.bat         # Windows keystore creation
+  import_certificate.sh       # Linux/Mac certificate import
+  import_certificate.bat      # Windows certificate import
+  convert_pem_to_p12.sh       # Linux/Mac PEM to PKCS12 conversion
+  convert_pem_to_p12.bat      # Windows PEM to PKCS12 conversion
 ```
 
 ### Making Scripts Executable (Linux/Mac)
 
 ```bash
-cd resources/ssl-tools
+cd src/main/resources/ssl-tools
 chmod +x *.sh
 ```
 
@@ -74,7 +76,7 @@ chmod +x *.sh
 
 ```bash
 # Generate self-signed certificate + keystore
-./resources/ssl-tools/create-keystore.sh \
+./src/main/resources/ssl-tools/create_keystore.sh \
     --type development \
     --output dev-keystore.p12 \
     --password changeit \
@@ -84,7 +86,7 @@ chmod +x *.sh
 
 **Windows:**
 ```cmd
-resources\ssl-tools\create-keystore.bat ^
+resources\ssl-tools\create_keystore.bat ^
     --type development ^
     --output dev-keystore.p12 ^
     --password changeit ^
@@ -119,7 +121,7 @@ openssl pkcs12 -export \
 
 ```bash
 # Import CA certificate into truststore
-./resources/ssl-tools/import-certificate.sh \
+./src/main/resources/ssl-tools/import_certificate.sh \
     --cert company-ca.crt \
     --truststore company-truststore.p12 \
     --password truststore-password \
@@ -128,7 +130,7 @@ openssl pkcs12 -export \
 
 **Windows:**
 ```cmd
-resources\ssl-tools\import-certificate.bat ^
+resources\ssl-tools\import_certificate.bat ^
     --cert company-ca.crt ^
     --truststore company-truststore.p12 ^
     --password truststore-password ^
@@ -519,7 +521,7 @@ company-root-ca.crt
 
 2. **Create truststore:**
 ```bash
-./resources/ssl-tools/import-certificate.sh \
+./src/main/resources/ssl-tools/import_certificate.sh \
     --cert company-root-ca.crt \
     --truststore company-truststore.p12 \
     --password $(cat /run/secrets/truststore-password) \
@@ -611,7 +613,7 @@ curl -o aws-ca-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global
 
 2. **Convert PEM bundle to PKCS12:**
 ```bash
-./resources/ssl-tools/convert-pem-to-p12.sh \
+./src/main/resources/ssl-tools/convert_pem_to_p12.sh \
     --input aws-ca-bundle.pem \
     --output aws-truststore.p12 \
     --password $(cat /run/secrets/truststore-password)
@@ -641,7 +643,7 @@ def client = new GroovyHttpClient(config)
 
 1. **Create self-signed certificate:**
 ```bash
-./resources/ssl-tools/create-keystore.sh \
+./src/main/resources/ssl-tools/create_keystore.sh \
     --type development \
     --output dev-keystore.p12 \
     --password changeit \
@@ -660,7 +662,7 @@ keytool -exportcert \
 
 3. **Create truststore:**
 ```bash
-./resources/ssl-tools/import-certificate.sh \
+./src/main/resources/ssl-tools/import_certificate.sh \
     --cert dev-cert.crt \
     --truststore dev-truststore.p12 \
     --password changeit \
@@ -679,6 +681,56 @@ def config = SecurityConfig.testing("https://localhost:8443")
 
 def client = new GroovyHttpClient(config)
 ```
+
+---
+
+## Corporate Proxies and TLS
+
+From 2.1 the client can be pointed at an explicit HTTP proxy (`proxy`, `proxyAuth`, `nonProxyHosts`, `noProxy` on the builder, or the matching `SecurityConfig` keys). Without them it uses the JVM's proxy settings, as in 2.0.
+
+### Tunnelling proxies
+
+For an `https://` target the client sends `CONNECT` to the proxy and runs TLS end to end with the target. Nothing in this guide changes: the target's certificate is verified against your trust store, and for mutual TLS your client certificate (`keyManagers`) is presented to the *target*, through the tunnel.
+
+```groovy
+def client = GroovyHttpClient.builder('https://partner-api.example.com')
+        .proxy('proxy.corp.example', 3128)
+        .trustStore(partnerCaStore)
+        .keyManagers(kmf.keyManagers)      // mTLS with the target, through the tunnel
+        .build()
+```
+
+### SSL-inspecting proxies
+
+Some corporate proxies terminate TLS and re-sign every site with their own CA. The target's certificate then appears to be issued by the proxy's CA, and verification fails with `PKIX path building failed` unless that CA is trusted. Import the proxy's CA certificate (your IT team publishes it) into a truststore, together with any other CAs you need, and supply it:
+
+```groovy
+def client = GroovyHttpClient.builder('https://api.example.com')
+        .proxy('proxy.corp.example', 3128)
+        .trustStore(corporateTrustStore)   // contains the proxy's inspection CA
+        .build()
+```
+
+Do not reach for `trustAll()` to get past an inspecting proxy: it disables verification for every site, not just the proxy.
+
+### Proxy authentication
+
+`proxyAuth(user, password)` sends Basic credentials to the proxy. For `https://` targets the JDK removes Basic credentials from `CONNECT` unless the JVM is started with:
+
+```
+-Djdk.http.auth.tunneling.disabledSchemes=""
+```
+
+This is a JVM-wide security setting, so the library does not set it. Without it the proxy answers 407 and the request fails with an `AuthenticationException` that names the property.
+
+### What does not work through a proxy
+
+- **SOCKS proxies**: the JDK `HttpClient` ignores them and connects directly, so a SOCKS proxy is refused when the client is built.
+- **HTTP/3**: QUIC is UDP and cannot be tunnelled through an HTTP proxy. HTTP/3-only clients are refused; other HTTP/3 settings fall back to HTTP/2.
+
+### OAuth2 token endpoints
+
+An OAuth2 token request (`auth { oauth2 { ... } }`) goes through the same `HttpClient`: same trust store, key managers and proxy. If your identity provider uses a private CA, include it in the trust store you give the client. The token endpoint must be HTTPS (plain HTTP is accepted only for a loopback host or with `insecureAllowed`).
 
 ---
 
@@ -849,7 +901,7 @@ keytool -list -keystore truststore.p12 -storepass password
 openssl s_client -connect api.example.com:443 -showcerts
 
 # Import missing CA certificate
-./resources/ssl-tools/import-certificate.sh \
+./src/main/resources/ssl-tools/import_certificate.sh \
     --cert missing-ca.crt \
     --truststore truststore.p12 \
     --password password \

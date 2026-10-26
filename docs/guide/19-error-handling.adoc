@@ -1,0 +1,67 @@
+[[error-handling]]
+== Error Handling
+
+[[http-response-exception]]
+=== HttpResponseException
+
+A status of 400 or above, after retries, becomes `HttpResponseException`. Its message is a fixed, log-safe summary:
+
+----
+HTTP 404 Not Found (GET https://api.example.com/orders/42, 1284 bytes, application/problem+json)
+----
+
+The reason phrase comes from the RFC 9110 table (HTTP/2 and HTTP/3 send none); the URI has no user info and no query string; and there is no body. Bodies routinely echo request data and tokens, and messages end up in logs. To include the start of the body, set `errorBodyPreviewChars` (0 to 4096; the `testing()` profile uses 120).
+
+The detail is on the exception:
+
+[cols="2,2,4"]
+|===
+|Field |Type |Notes
+
+|`statusCode` |`int` |
+|`reasonPhrase` |`String` |
+|`method` |`String` |
+|`uri` |`URI` |The full URI, query string included: log it with care
+|`responseHeaders`, `header(name)` |`Map` / `String` |Case-insensitive
+|`contentType` |`MediaType` |Null if the response had none
+|`responseBody` |`String` |Decoded with the response charset
+|`responseBytes` |`byte[]` |A copy
+|`json`, `parsed`, `bodyAs(Type)` |`Object` |Parsed with the client's codecs
+|`problem` |`ProblemDetail` |RFC 9457 detail, or null
+|`response` |`HttpClientResponse` |The response, when available
+|===
+
+The exception is serialisable; after deserialisation the parsing accessors throw `IllegalStateException` (the codecs are not serialised) while the raw fields still work.
+
+[[problem-details]]
+=== Problem details
+
+When the error body is `application/problem+json`, `e.problem` gives `type`, `title`, `status`, `detail`, `instance` and `extensions` (any other members). `r.problem` does the same inside a response handler. `application/problem+xml` is not parsed.
+
+[[size-limit-exception]]
+=== ResponseTooLargeException
+
+Raised when a body exceeds `maxResponseBytes`. It extends `HttpResponseException` and keeps status 413, so existing `catch` blocks still see it, and adds `limit` and `bytesRead`. It is raised the same way on every protocol, and it is not retried.
+
+[[exception-catalogue]]
+=== All exceptions
+
+[cols="3,5,2"]
+|===
+|Exception |When |Retried?
+
+|`HttpResponseException` |Status 400 or above |By status, per policy
+|`ResponseTooLargeException` |Body over `maxResponseBytes` |No
+|`java.net.http.HttpTimeoutException` |No headers within the request timeout, or a body idle past `idleTimeout` |Per policy
+|`IOException` (`ConnectException`...) |Connection refused or reset, TLS failure |Per policy
+|`CircuitOpenException` |The circuit breaker is open |No
+|`RedirectRejectedException` |A redirect broke policy, or would re-send a one-shot body |No
+|`ContentParseException` |A body could not be parsed or mapped onto a class |No
+|`ContentDecodingException` |A gzip/deflate body is corrupt or truncated |No
+|`StreamItemTooLargeException` |A line or event exceeded `maxStreamItemBytes` |No
+|`AuthenticationException` |An OAuth2 token request failed, or a proxy refused the tunnel |No
+|`IllegalArgumentException` |A host that is not allowed, or an invalid setting |No
+|`java.util.concurrent.TimeoutException` |Your own `++*Sync++` wait expired |--
+|===
+
+The `++*Sync++` methods throw these directly; asynchronous calls complete their future exceptionally with them.

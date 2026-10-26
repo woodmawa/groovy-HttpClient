@@ -1,0 +1,29 @@
+[[configuration-model]]
+== The Configuration Model
+
+Configuration lives in two places:
+
+[source,groovy]
+----
+def client = GroovyHttpClient.builder('https://api.example.com')   // client configuration:
+        .requestTimeout(Duration.ofSeconds(20))                    //   applies to every request
+        .auth { bearer token }
+        .build()
+
+client.getSync('/reports/42') {                                    // request configuration:
+    timeout Duration.ofSeconds(120)                                //   this request only,
+    auth { bearer reportToken }                                    //   wins over the client's
+}
+----
+
+* *Client configuration* is fixed when the client is built: connection, TLS, protocol, proxy, limits, defaults. It comes from the builder or from a `SecurityConfig` (a profile plus `withOverrides`); both accept the same settings. A few client-wide defaults can also be changed later on the client itself: default headers, cookies, `auth { }`, `defaultResponse { }` and interceptors.
+* *Request configuration* is the closure passed to a verb. Where a request setting has a client counterpart (timeout, retry policy, auth, compression, size limit, response handlers), the request's value wins for that request. Response handlers merge key by key: a request's `when(404)` keeps the client's `when(401)`.
+
+[source,groovy]
+----
+// The same settings, two ways
+def a = GroovyHttpClient.builder(url).maxResponseBytes(5_000_000L).compression(true).build()
+def b = new GroovyHttpClient(SecurityConfig.defaults(url).withOverrides(maxResponseBytes: 5_000_000L, compression: true))
+----
+
+Settings are validated when the client is built. An unknown name in a `SecurityConfig` map is refused with the list of valid names, so a typo in a security setting cannot be silently ignored.

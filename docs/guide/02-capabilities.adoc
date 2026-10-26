@@ -1,0 +1,112 @@
+[[capabilities]]
+== Core Features and Capabilities
+
+What the library covers, in one table, with where to read more. You need only the first few rows to be productive; the rest are there when your application needs them.
+
+[cols="2,5,1"]
+|===
+|Capability |What you get |Read
+
+3+|*Essentials*
+
+|Request DSL
+|`client.getSync('/orders') { query(...); header ...; json(...) }` -- every verb, sync and async
+|<<get-requests>>
+
+|Reading responses
+|Status, headers, text, bytes, JSON, XML, CSV; typed results such as `getSync(Order, '/orders/42')`
+|<<handling-results>>
+
+|Errors
+|`HttpResponseException` with status, headers and body as fields; RFC 9457 problem details; log-safe messages
+|<<error-handling>>
+
+|REST patterns
+|Pagination (page, offset, cursor, `Link` header), filtering and sorting, versioned APIs
+|<<rest-patterns>>
+
+|Sync, async, streaming
+|`getSync` waits, `get` returns a `CompletableFuture`; downloads and event streams never load the whole body
+|<<sync-async-streaming>>
+
+|Secure defaults
+|Certificate and host-name verification, host allow-listing on every redirect, bounded response sizes
+|<<security-basics>>
+
+3+|*Content*
+
+|Codecs
+|JSON, XML, CSV, form and text built in; typed mapping onto your classes; your own encoders and parsers; optional Jackson
+|<<codecs>>
+
+|Response handlers
+|`response { success {}; when(404) {}; failure {}; exception {} }` turns outcomes into values
+|<<response-handlers>>
+
+|Multipart
+|File uploads and form parts, from a DSL or a list
+|<<multipart>>
+
+|Compression
+|Opt-in gzip and deflate; the size limit counts decompressed bytes
+|<<compression>>
+
+|Streaming
+|Downloads to files; uploads from files, streams and publishers; lines, Server-Sent Events, NDJSON
+|<<streaming>>
+
+3+|*Connecting*
+
+|Protocols
+|HTTP/1.1, HTTP/2, and HTTP/3 on JDK 26+ with fallback
+|<<http3>>
+
+|TLS
+|Trust stores, client certificates (mutual TLS), protocol and cipher control
+|<<client-tls>>
+
+|Authentication
+|Basic, bearer, API key, OAuth2 client credentials
+|<<authentication>>
+
+|Proxies
+|Explicit HTTP proxy with authentication and bypass rules
+|<<proxies>>
+
+|Cookies
+|Automatic cookie handling with policies
+|<<cookies>>
+
+3+|*Operating*
+
+|Resilience
+|Retry policies with backoff and jitter; a circuit breaker you can inspect and listen to
+|<<resilience>>
+
+|Metrics
+|Per-client counters: requests, outcomes, status classes, retries, timeouts, latency
+|<<metrics>>
+
+|Interceptors
+|Middleware around every request: metrics, tracing, custom headers
+|<<interceptors>>
+
+|Logging
+|Credential-safe request lines through SLF4J
+|<<logging>>
+
+|Testing
+|A mock HTTP server, a test DSL and a Spock trait, published for your own tests
+|<<test-platform>>
+
+|URL builder
+|Build URLs with encoded query parameters
+|<<url-builder>>
+|===
+
+=== What it deliberately does not do
+
+* *SOCKS proxies.* The JDK `HttpClient` ignores them and connects directly; the client refuses them rather than bypass your proxy silently (<<proxies>>).
+* *Digest authentication.* Not supported by the JDK client and rare in modern APIs.
+* *Server-Sent Event reconnection.* Events carry their `id`, so you can resume, but the client does not reconnect on its own.
+* *Response caching.* Cache in your own code, or use an interceptor.

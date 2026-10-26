@@ -1,0 +1,162 @@
+[[creating-a-client]]
+== Creating a Client
+
+A client represents *one remote service*: its base URL, how to connect to it securely, and how to behave when it misbehaves. Creating it well is most of the configuration work you will do; individual requests then only say what is different about them.
+
+=== Choosing how to create it
+
+[cols="2,3,3"]
+|===
+|Way |Use it when |Example
+
+|`new GroovyHttpClient(url)`
+|Scripts, prototypes, tools, and services where the safe defaults suit you.
+|`new GroovyHttpClient('https://httpbin.org')`
+
+|`GroovyHttpClient.builder(url)...build()`
+|Application code. You set what matters in code that reads like the settings it makes.
+|`builder(url).requestTimeout(...).auth { ... }.build()`
+
+|`new GroovyHttpClient(SecurityConfig.production(url))`
+|Settings that differ by environment, or come from configuration files: pick a profile, override from config.
+|`SecurityConfig.production(url).withOverrides(cfg)`
+
+|`new GroovyHttpClient(config, codecRegistry)`
+|Several clients sharing one set of custom codecs.
+|see <<codecs>>
+|===
+
+The builder and `SecurityConfig` accept the same settings; the builder is the more readable in code, `SecurityConfig` the more convenient when settings are data.
+
+=== The constructor
+
+[source,groovy]
+----
+def client = new GroovyHttpClient('https://httpbin.org')
+----
+
+This uses `SecurityConfig.defaults(url)`: certificates and host names verified, requests allowed only to the base URL's host, redirects followed (up to 5, each checked), a 10 s connect timeout, a 30 s request timeout, a 10 MB response limit, and no retries. That is a good choice whenever a failed call can simply be reported -- a script, a command-line tool, a batch job that is re-run.
+
+=== The builder
+
+For services, configure the client explicitly. Every setting has a default, so set only what you have a reason to:
+
+[source,groovy]
+----
+def orders = GroovyHttpClient.builder('https://orders.internal.example.com')
+        .connectTimeout(Duration.ofSeconds(3))        // fail fast if the service is down
+        .requestTimeout(Duration.ofSeconds(10))       // its slowest normal response, plus margin
+        .retryPolicy(standardRetries)                 // transient failures happen
+        .failureThreshold(5).resetTimeoutMs(30_000)   // stop calling a service that is down
+        .maxResponseBytes(5_000_000L)                 // its largest normal response, plus margin
+        .compression(true)                            // it serves gzip
+        .trustStore(internalCa)                       // its certificate comes from a private CA
+        .auth { oauth2 { tokenUrl tokenEndpoint; clientId 'orders-ui'; clientSecret secret } }
+        .build()
+----
+
+Ask these questions for each service you call, and set the matching builder method:
+
+[cols="3,2,2"]
+|===
+|Question |Setting |Chapter
+
+|How quickly should I give up if it does not answer? |`connectTimeout`, `requestTimeout` |<<client-timeouts>>
+|Can it fail briefly, and is it safe to repeat a call? |`retryPolicy` |<<resilience>>
+|What should happen when it is down for minutes? |`failureThreshold`, `resetTimeoutMs` |<<circuit-breaker>>
+|How large can its responses be? |`maxResponseBytes`, or stream |<<client-limits>>
+|How does it authenticate me? |`auth { }` |<<authentication>>
+|Does it use a private CA, or need my certificate? |`trustStore`, `keyManagers` |<<client-tls>>
+|Is there a proxy between us? |`proxy`, `noProxy` |<<proxies>>
+|Does it serve compressed or HTTP/3 responses? |`compression`, `http3` |<<compression>>, <<http3>>
+|Which outcomes should never be exceptions? |`response { }` |<<response-handlers>>
+|===
+
+<<client-configuration>> lists every setting.
+
+=== Profiles and externalised settings
+
+`SecurityConfig` has named starting points:
+
+[cols="1,4"]
+|===
+|`defaults(url)` |What the plain constructor uses (above).
+|`production(url)` |TLS 1.3 only, 5 s connect and 20 s request timeouts, 3 attempts with exponential backoff for I/O errors, timeouts and 5xx, metrics on.
+|`staging(url)` |`production` with request logging on and a 30 s request timeout.
+|`testing(url)` |For tests against local servers: absolute URLs allowed, all cookies accepted, logging on, no retries, metrics off, 120 characters of error body in exception messages. Certificates are still verified.
+|`trustAll(url)` |Accepts *any* certificate. Throwaway local debugging only; it logs a warning.
+|===
+
+Start from the closest profile and override what differs. Because `withOverrides` takes a map, settings can come straight from your application's configuration:
+
+[source,groovy]
+----
+// application.yml
+// orders:
+//   baseUrl: https://orders.internal.example.com
+//   requestTimeout: PT10S
+//   maxResponseBytes: 5000000
+
+def cfg = appConfig.orders
+def client = new GroovyHttpClient(SecurityConfig.production(cfg.baseUrl).withOverrides(
+        requestTimeout  : Duration.parse(cfg.requestTimeout),
+        maxResponseBytes: cfg.maxResponseBytes as long))
+----
+
+An unknown key is refused with the list of valid keys, so a typo in a configuration file fails at start-up rather than silently leaving a default in place.
+
+=== Calling more than one host
+
+By default a client refuses absolute URLs and any host other than its base URL's. Usually the right answer is one client per service. When one client genuinely needs several hosts -- a CDN alongside an API, say -- allow both explicitly:
+
+[source,groovy]
+----
+def client = GroovyHttpClient.builder('https://api.example.com')
+        .allowAbsoluteUrls(true)
+        .allowedHosts(['api.example.com', 'files.example.com'] as Set)
+        .build()
+
+client.getSync('https://files.example.com/report.pdf')
+----
+
+This is the protection against server-side request forgery: a URL that came from user input cannot make your service call an arbitrary host.
+
+=== Default headers
+
+Headers that every request to this service needs:
+
+[source,groovy]
+----
+client.withHeader('X-Client', 'orders-service')      // add a value
+client.setHeader('Accept', 'application/json')       // replace all values
+client.withHeaders(['X-Team': 'payments'])
+client.clearHeaders()
+client.defaultHeaders                                 // what is set now
+----
+
+A request can add to them with `header(...)` or replace one with `setHeader(...)` in its closure. Use default headers for things that never change per request (client identification, `Accept`); use `auth { }` for credentials, never a default `Authorization` header, so credentials get the origin and redirect protection described in <<authentication>>.
+
+=== Lifecycle
+
+A client owns a connection pool and an executor. Create it once, share it, and close it when the application stops:
+
+* *Scripts:* `withCloseable`.
++
+[source,groovy]
+----
+new GroovyHttpClient('https://httpbin.org').withCloseable { client ->
+    println client.getSync('/get').statusCode
+}
+----
+* *Applications:* hold it in a field or a singleton and close it on shutdown.
+* *Spring:* declare it as a bean; Spring calls `close()` for you.
++
+[source,groovy]
+----
+@Bean
+GroovyHttpClient ordersClient(OrdersProperties p) {
+    GroovyHttpClient.builder(p.baseUrl).requestTimeout(p.timeout).auth { bearer { -> p.token } }.build()
+}
+----
+
+Do not create a client per request: each one starts its own connection pool, so you lose connection reuse and HTTP/2 multiplexing.

@@ -1,0 +1,8 @@
+[[history]]
+== History
+
+*1.x (2025).* The first releases wrapped the JDK `HttpClient` in a Groovy DSL with retries, a circuit breaker, multipart uploads, cookie handling and a testing toolkit, running every request on a virtual thread.
+
+*2.0 (October 2026).* A security review of 1.0.2 led to a release that changed several defaults: TLS certificates are verified by the plain constructor, redirects are checked against the allowed hosts on every hop, response sizes are enforced while the body arrives, and the synchronous methods throw the real exception rather than `ExecutionException`. It also moved to Groovy 6 and Java 25 and added HTTP/3. The request DSL was tightened: per-request settings such as `timeout(...)` take effect on every attempt, and an unknown call in a request closure fails instead of being ignored.
+
+*2.1 (this release).* Content and connectivity: codecs and typed results, response handlers, error detail and problem details, streaming, compression, authentication helpers, explicit proxies, and the testing toolkit published as test fixtures. The DSL now resolves your own constants and variables correctly inside request closures, and statically compiled callers are supported. Nothing breaks for 2.0 callers who do not parse exception messages; see <<upgrading>>.

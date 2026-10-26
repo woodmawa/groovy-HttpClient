@@ -1,0 +1,138 @@
+[[get-requests]]
+== GET Requests
+
+Most calls you make will be GETs: fetch a resource, search a collection, check something exists. This chapter shows how to build them and, as importantly, how to read what comes back.
+
+=== Paths
+
+The path is the verb's first argument and is appended to the base URL, including any path the base URL already has:
+
+[source,groovy]
+----
+def api = GroovyHttpClient.builder('https://api.example.com/v2').build()
+api.getSync('/orders/42')            // GET https://api.example.com/v2/orders/42
+api.getSync("/customers/${id}/orders")
+----
+
+The path is used as you give it. If part of it comes from a user or from data, encode that segment first, so a value such as `a/b` or `x y` cannot change the path:
+
+[source,groovy]
+----
+import java.nio.charset.StandardCharsets
+
+String seg(String s) { URLEncoder.encode(s, StandardCharsets.UTF_8).replace('+', '%20') }
+
+api.getSync("/products/${seg(sku)}")
+----
+
+=== Query parameters
+
+`query(Map)` adds parameters and encodes them for you; call it as often as you like:
+
+[source,groovy]
+----
+def client = new GroovyHttpClient('https://httpbin.org')
+
+def r = client.getSync('/get') {
+    query(search: 'groovy http', page: 2)          // ?search=groovy+http&page=2
+    query(tag: ['a', 'b'])                         // repeated: &tag=a&tag=b
+    query(debug: null)                             // null values are skipped
+}
+assert r.json.args.search == 'groovy http'
+----
+
+A query string already in the path is kept, so `getSync('/get?debug=true') { query(page: 2) }` sends both. Prefer `query(...)` for anything that varies: values are encoded exactly once, so `&`, `=`, `/`, `?` and non-ASCII characters arrive intact.
+
+=== Headers
+
+[source,groovy]
+----
+client.getSync('/get') {
+    header 'Accept', 'application/json'
+    header 'X-Request-Id', UUID.randomUUID().toString()
+}
+----
+
+`header` adds a value to whatever the client already sends; `setHeader` replaces it for this request. Headers the client sends on every request are set once on the client (<<creating-a-client>>).
+
+=== Reading the response
+
+A plain verb returns an `HttpClientResponse`:
+
+[source,groovy]
+----
+r.statusCode                  // 200
+r.success                     // true for 2xx; also clientError, serverError
+r.getHeader('Content-Type')   // first value, case-insensitive
+r.headers                     // Map<String, List<String>>
+r.contentType                 // MediaType, e.g. application/json; charset=utf-8
+r.body                        // the body as text, decoded with the response charset
+r.bytes                       // the raw bytes
+r.json                        // parsed JSON: Map / List
+r.xml                         // parsed XML: GPathResult
+r.parsed                      // parsed according to Content-Type
+r.bodyAs(Order)               // mapped onto your class
+r.httpVersion                 // HTTP_1_1, HTTP_2 or HTTP_3
+----
+
+Which accessor to use:
+
+[cols="2,4"]
+|===
+|`json` |You know the service returns JSON and want to navigate it with GPath: `++r.json.items*.id++`.
+|`bodyAs(Type)` or a typed verb |You have a class for the resource and want compile-time names and types.
+|`parsed` |The content type varies (JSON from one endpoint, CSV from another) or you are writing generic code.
+|`xml` |XML services; navigate with GPath: `r.xml.order.@id`.
+|`body` / `bytes` |You need the exact text or bytes: signatures, hashing, passing through unchanged.
+|===
+
+`json` and `xml` throw `ContentParseException` if the body is not of that type; `jsonOrNull` and `xmlOrNull` return null instead. The body is held in memory with the response, so you can use several accessors on the same response.
+
+=== Typed results
+
+Map the body onto your own class:
+
+[source,groovy]
+----
+class Post {
+    Integer userId
+    Integer id
+    String title
+    String body
+}
+
+def api = new GroovyHttpClient('https://jsonplaceholder.typicode.com')
+
+Post p = api.getSync(Post, '/posts/1')                  // a typed verb
+List<Post> all = api.getSync('/posts').json.collect { it as Post }
+----
+
+Nested objects and arrays of classes are mapped too. A JSON key your class has no property for fails with `ContentParseException` naming the class and the key, so a renamed field is caught rather than silently dropped. <<codecs>> explains the mapping rules and how Jackson takes over when it is on the classpath.
+
+=== Conditional GET
+
+Servers that send an `ETag` or `Last-Modified` header let you re-fetch only when something changed. A `304 Not Modified` is not an error, so it comes back as a response:
+
+[source,groovy]
+----
+String etag = cache.etag
+def r = client.getSync('/catalogue') { if (etag) header 'If-None-Match', etag }
+
+if (r.statusCode == 304) {
+    return cache.value                         // unchanged
+}
+cache.update(r.getHeader('ETag'), r.json)
+----
+
+=== HEAD and OPTIONS
+
+[source,groovy]
+----
+def h = client.headSync('/get')              // headers only: size, type, last modified
+println h.getHeader('Content-Length')
+
+def o = client.optionsSync('/get')           // what the resource supports
+println o.getHeader('Allow')
+----
+
+Collections, pagination, filters and versioned APIs are covered in <<rest-patterns>>.

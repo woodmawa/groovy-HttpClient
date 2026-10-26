@@ -1,0 +1,160 @@
+[[sending-data]]
+== Sending Data
+
+=== The verbs and what they mean
+
+[cols="1,4,1"]
+|===
+|Verb |Use it to |Retried by default?
+
+|`POST` |Create something, or run an action (`/orders`, `/orders/42/cancel`). Not idempotent: sending it twice may create two orders. |No
+|`PUT` |Replace a resource with the representation you send. Idempotent: sending it twice leaves the same result. |Yes, if a retry policy is set
+|`PATCH` |Change part of a resource. Usually not idempotent. |No
+|`DELETE` |Remove a resource. Idempotent. |Yes, if a retry policy is set
+|===
+
+`post`, `put` and `patch` take a path, an optional body string, and the request closure. Usually you pass `null` and build the body in the closure:
+
+[source,groovy]
+----
+def client = new GroovyHttpClient('https://httpbin.org')
+
+client.postSync('/post', null) { json([name: 'Alice', roles: ['admin']]) }
+client.putSync('/put', null)   { json([id: 7, name: 'Alice']) }
+client.patchSync('/patch', null) {
+    body([name: 'Alicia'], 'application/merge-patch+json')     // RFC 7396 merge patch
+}
+client.deleteSync('/delete')
+
+client.postSync('/post', 'plain text body')                  // a string body, sent as is
+----
+
+=== Choosing how to send the body
+
+[cols="2,3,3"]
+|===
+|Method |Sends |Use it for
+
+|`json(value)` |`application/json` |Most APIs. Maps, lists and your objects are serialised; a `String` is sent unchanged (pre-built JSON).
+|`form(Map)` |`application/x-www-form-urlencoded` |HTML-style forms, OAuth token endpoints, older APIs. A list value repeats the field.
+|`body(value, type)` |the type you name |Any other format with a codec: CSV, XML, your own media types (<<codecs>>).
+|`body(byte[], type)` |the bytes, unchanged |Binary payloads you already hold: images, PDFs, signed documents.
+|`body(Path)` / `body(File)` |the file, streamed |Uploads larger than you want in memory; replayable, so retries and 307/308 redirects work.
+|`body(InputStream, type)` |the stream, chunked |Data produced on the fly; sent once, never retried.
+|multipart |`multipart/form-data` |Uploads that combine files and fields, as browsers do.
+|===
+
+=== JSON
+
+[source,groovy]
+----
+class NewOrder { String sku; int qty }
+
+client.postSync('/post', null) { json(new NewOrder(sku: 'A1', qty: 2)) }    // {"sku":"A1","qty":2}
+client.postSync('/post', null) { json([items: [[sku: 'A1'], [sku: 'B7']]]) }
+client.postSync('/post', null) { json('{"raw":"json"}') }                    // sent as given
+----
+
+With Jackson on the classpath, objects are serialised by Jackson, so your Jackson annotations apply.
+
+=== Forms
+
+[source,groovy]
+----
+def r = client.postSync('/post', null) {
+    form(username: 'alice', remember: 'true', scope: ['read', 'write'])
+}
+assert r.json.form.username == 'alice'
+----
+
+=== Other content types
+
+[source,groovy]
+----
+client.postSync('/post', null) { body([[sku: 'A1', qty: 2], [sku: 'B7', qty: 1]], 'text/csv') }   // header row + rows
+client.postSync('/post', null) { body({ order(id: 7) { line(sku: 'A1') } }, 'application/xml') }  // markup builder
+client.postSync('/post', null) { body(pdfBytes, 'application/pdf') }
+----
+
+[[multipart]]
+=== Multipart documents
+
+Multipart (`multipart/form-data`) is how browsers upload files: one request carrying several *parts*, each with a name, optionally a filename and its own content type. Use it when the server expects a form upload; for an API that accepts a raw file, `body(Path)` is simpler and streams.
+
+Describe the parts in a DSL:
+
+[source,groovy]
+----
+def r = client.postMultipartSync('/post') { b ->
+    b.part {
+        name 'description'
+        content 'Quarterly report'
+    }
+    b.part {
+        name 'file'
+        filename 'report.csv'
+        contentType 'text/csv'
+        data new File('report.csv').bytes
+    }
+    b.header 'X-Upload-Id', 'u-42'
+}
+----
+
+or build the parts yourself, which suits parts computed from data:
+
+[source,groovy]
+----
+import org.softwood.http.MultipartPart
+
+def parts = [
+        MultipartPart.text('description', 'Quarterly report'),
+        MultipartPart.json('metadata', '{"quarter":"Q3"}'),
+        MultipartPart.bytes('file', 'report.csv', 'text/csv', csvBytes)
+]
+client.postMultipartSync('/post', parts) { header 'X-Upload-Id', 'u-42' }
+----
+
+With a list of parts, the closure is the ordinary request closure, so `auth { }`, `gzipBody()` and the other request settings work there. Part names, filenames and content types are checked for line breaks, so user-supplied file names cannot inject headers.
+
+*Fields and files.* A part with a filename is a file upload; a part without one is a plain form field, which is how servers tell them apart (RFC 7578; for example Spring's `@RequestParam` versus `MultipartFile`):
+
+[cols="2,2"]
+|===
+|Sent as a field (no filename) |Sent as a file
+
+|`MultipartPart.text(...)`, `MultipartPart.json(...)` |`MultipartPart.bytes(name, filename, ...)`
+|DSL part with `content` and no `filename` |DSL part with a `filename`, or with `data` (named `<name>.bin` if you give no filename)
+|===
+
+[[redirects-after-post]]
+=== Redirects after a POST
+
+Redirects are followed automatically (up to 5 hops, each checked against the allowed hosts). What happens to the method and body depends on the status:
+
+[cols="1,3"]
+|===
+|`303 See Other` |The next request is a `GET` without a body: the usual "post, then redirect to the result" pattern.
+|`301`, `302` |A `POST` becomes a `GET` without a body, as browsers do.
+|`307`, `308` |Method and body are kept and re-sent to the new location. A one-shot body (an `InputStream` or publisher) cannot be re-sent, so the redirect is refused with `RedirectRejectedException`.
+|===
+
+[source,groovy]
+----
+def r = client.postSync('/redirect-to?url=/get&status_code=303', null) { form(a: '1') }
+assert r.json.url == 'https://httpbin.org/get'       // followed with a GET
+----
+
+To receive the 3xx response itself -- to read a `Location` header after creating something, say -- build the client with `allowRedirects(false)`.
+
+=== Making POST safe to retry
+
+POST and PATCH are never retried unless you say so, because a retry after a lost response could apply the change twice. If the API supports idempotency keys, send one and opt in:
+
+[source,groovy]
+----
+client.postSync('/payments', null) {
+    header 'Idempotency-Key', UUID.randomUUID().toString()
+    json(payment)
+    retry { maxAttempts 3; onIoExceptions(true); onTimeouts(true); retryNonIdempotent(true) }
+}
+----

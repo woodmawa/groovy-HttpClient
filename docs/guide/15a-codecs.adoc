@@ -1,0 +1,182 @@
+[[codecs]]
+[[codecs-config]]
+== Codecs and Data Transformation
+
+HTTP moves bytes; your code works with maps, lists, strings and your own classes. *Codecs* translate between the two, chosen by media type, in both directions:
+
+----
+request:   your value  --encoder for the Content-Type-->  bytes on the wire
+response:  bytes       --parser for the Content-Type---->  Map / List / GPathResult / String / your class
+----
+
+Every client has a `CodecRegistry`. It starts with the built-in codecs, picks up Jackson if it is on the classpath, and takes whatever you add.
+
+=== Where codecs are used
+
+[cols="2,3"]
+|===
+|`json(value)`, `form(map)`, `body(value, type)` |Encode the request body with the encoder for that type
+|`r.parsed`, `r.json`, `r.xml` |Parse the response body
+|`r.bodyAs(Type)`, `r as Type`, typed verbs (`getSync(Type, path)`) |Parse, then map onto your class
+|`e.json`, `e.parsed`, `e.bodyAs(Type)`, `e.problem` on `HttpResponseException` |The same for error bodies
+|===
+
+=== The built-in codecs
+
+[cols="2,3,3"]
+|===
+|Media types |Encodes (request) |Parses to (response)
+
+|`application/json`, `++*/*+json++`
+|Maps, lists and objects with Groovy's `JsonOutput`; a `String` or `byte[]` as given
+|`Map` / `List` / scalars (`JsonSlurper`); an empty body is `null`
+
+|`application/xml`, `text/xml`, `++*/*+xml++`
+|A `String`; a markup closure (`{ order(id: 7) { line(sku: 'A1') } }`, via `StreamingMarkupBuilder`); a `GPathResult`
+|`GPathResult` (`XmlSlurper`). DOCTYPE declarations and external entities are refused, so XXE and "billion laughs" attacks fail.
+
+|`text/csv`
+|A list of maps (header row = all keys, in first-seen order) or a list of lists (no header); RFC 4180 quoting, CRLF line ends
+|A list of maps, one per record, keyed by the header row; a record longer than the header fails
+
+|`application/x-www-form-urlencoded`
+|A map; list values repeat the key; `null` values skipped
+|`Map<String, List<String>>`
+
+|`text/plain`, `++text/*++`
+|`String.valueOf(value)`
+|`String`
+
+|`application/octet-stream`
+|`byte[]` only
+|`byte[]`
+
+|anything else (`++*/*++`)
+|no encoder: `body(value, type)` fails
+|`String` (or `byte[]` if you ask for `byte[]`)
+|===
+
+Text is decoded and encoded with the `charset` of the media type, UTF-8 if none.
+
+[source,groovy]
+----
+def bin = new GroovyHttpClient('https://httpbin.org')
+
+bin.postSync('/post', null) { body([[sku: 'A1', qty: 2], [sku: 'B7', qty: 1]], 'text/csv') }
+// sku,qty
+// A1,2
+// B7,1
+
+bin.postSync('/post', null) {
+    body({ order(id: 7) { line(sku: 'A1', qty: 2) } }, 'application/xml')
+}
+// <order id='7'><line sku='A1' qty='2'/></order>
+
+def report = client.getSync('/reports/stock.csv').parsed      // List<Map>: [[sku:'A1', qty:'2'], ...]
+----
+
+=== Media type matching
+
+The registry picks the most specific codec for the type:
+
+. the exact type -- `application/vnd.acme.order+json` if you registered it;
+. the structured suffix -- `{plus}json` and `{plus}xml` types fall to `++*/*+json++` and `++*/*+xml++`, so `application/problem+json`, `application/hal+json` and vendor types work with no set-up;
+. a type wildcard -- `++text/*++`;
+. `++*/*++`.
+
+Parameters other than `charset` (`; version=2`) do not affect the choice. Among codecs for the same pattern, yours win over a provider's (Jackson), which win over the built-ins.
+
+=== Typed results: mapping onto your classes
+
+`bodyAs(Type)` and typed verbs parse the body, then map it onto `Type`. Without Jackson the mapping is plain Groovy:
+
+* A JSON object becomes an instance created with the no-argument constructor, its properties set from the object's members -- recursively, for properties whose type is a class of yours.
+* A JSON array becomes a `List` (elements as parsed), or an array of your class if you ask for `Order[]`.
+* Numbers, strings and booleans are converted with Groovy's normal casting.
+* *A member your class has no property for is an error* (`ContentParseException` naming the class and the member), so a renamed field is caught instead of silently lost. Jackson behaves the same by default.
+
+[source,groovy]
+----
+class Line  { String sku; Integer qty }
+class Order { Long id; String status; List<Line> lines; Customer customer }
+
+Order o = client.getSync(Order, '/orders/42')
+Order[] many = client.getSync(Order[], '/orders')
+----
+
+Classes need a no-argument constructor and settable properties (a normal Groovy class has both). For immutable classes, records, or properties named differently from the JSON, use Jackson. Elements of a `List<Line>` property stay maps without Jackson, because Groovy does not see the element type at run time; declare an array (`Line[] lines`) or use Jackson when you need them typed.
+
+CSV and form bodies map the same way: each CSV record (a map) can become an instance of your class.
+
+=== Jackson
+
+When `jackson-databind` 2.x is on the classpath, the registry registers Jackson for `application/json` and `++*/*+json++`. It then handles typed results and the encoding of objects -- so `@JsonProperty`, `@JsonIgnoreProperties`, records, Java time types and the rest of Jackson apply. Untyped access (`r.json`, `r.parsed`) stays on Groovy's parser, so the types you get back from it never change with the classpath.
+
+To use your own configured `ObjectMapper`:
+
+[source,groovy]
+----
+def mapper = new ObjectMapper().findAndRegisterModules()
+        .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+
+def client = GroovyHttpClient.builder(url).codecs { jackson mapper }.build()
+----
+
+=== Your own codecs
+
+Register a parser, an encoder, or both, for any media type pattern:
+
+[source,groovy]
+----
+def client = GroovyHttpClient.builder(url).codecs {
+    // YAML in and out, with SnakeYAML
+    parser  'application/x-yaml', { String text -> new Yaml().load(text) }
+    encoder 'application/x-yaml', { body -> new Yaml().dump(body) }
+
+    // a vendor JSON type with its own mapper
+    parser 'application/vnd.tmf+json', { String text, MediaType type, Class target -> tmfMapper.readValue(text, target) }
+
+    // protocol buffers, as bytes
+    parser  'application/x-protobuf', { byte[] bytes, MediaType type, Class target -> target.parseFrom(bytes) }
+    encoder 'application/x-protobuf', { msg -> msg.toByteArray() }
+}.build()
+
+def r = client.postSync('/config', null) { body([replicas: 3], 'application/x-yaml') }
+Map cfg = client.getSync('/config').parsed
+----
+
+* A *parser* closure whose first parameter is a `String` receives the decoded text; otherwise it receives the raw `byte[]`. It may also take the `MediaType` and the requested `Class`, and should return a value of that class when one is asked for.
+* An *encoder* closure receives the body value (and optionally the `MediaType`) and returns `byte[]` or a `CharSequence` (encoded with the type's charset).
+* For reuse across projects, implement `org.softwood.http.codec.CodecProvider` and list the class in `META-INF/services/org.softwood.http.codec.CodecProvider`: every client then picks it up automatically, as it does Jackson. `codecs { withoutProviders() }` switches provider discovery off for one client.
+
+To share one set of codecs between several clients, build a registry once:
+
+[source,groovy]
+----
+CodecRegistry shared = CodecRegistry.builder()
+        .parser('application/x-yaml', { String t -> new Yaml().load(t) })
+        .build()
+
+def a = GroovyHttpClient.builder(urlA).codecs(shared).build()
+def b = GroovyHttpClient.builder(urlB).codecs(shared).build()
+----
+
+=== Transforming data in the request and response
+
+Codecs handle the format; everything else is ordinary Groovy around the call. A few common shapes:
+
+[source,groovy]
+----
+// project a response: only the fields you need
+def summaries = client.getSync('/orders').json.collect { [id: it.id, total: it.total] }
+
+// reshape before sending: rename keys to the API's names
+client.postSync('/customers', null) { json(customer.properties.subMap(['name', 'email']) + [externalRef: customer.id]) }
+
+// convert between formats: CSV in, JSON out
+def rows = files.getSync('/exports/stock.csv').parsed
+api.postSync('/stock', null) { json(rows.collect { [sku: it.sku, qty: it.qty as int] }) }
+
+// typed result through a response handler, with a default
+Order o = client.getSync(Order, '/orders/42') { response { when(404) { new Order(id: 42, status: 'unknown') } } }
+----

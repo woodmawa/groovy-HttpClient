@@ -1,0 +1,113 @@
+[[handling-results]]
+== Handling Results
+
+Every call ends in one of three ways: a response below 400, a response of 400 or above, or no response at all (the connection failed, it timed out, the circuit breaker refused). The library gives you three styles for dealing with them. Pick per call, or mix them.
+
+[cols="2,3,3"]
+|===
+|Style |Looks like |Best when
+
+|*Exceptions* (the default)
+|`try { client.getSync(...) } catch (HttpResponseException e)`
+|Failure is exceptional, and the caller further up should deal with it -- most service-to-service calls.
+
+|*Response handlers*
+|`response { success {...}; when(404) {...}; exception {...} }`
+|Some non-2xx outcomes are normal answers (404 "not found", 409 "already exists"), or you want a fallback value.
+
+|*Typed results*
+|`Order o = client.getSync(Order, '/orders/42')`
+|You want your own type back. Combines with either style above.
+|===
+
+=== Exceptions
+
+A status of 400 or above throws `HttpResponseException` after any retries; network failures throw the underlying exception:
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient.HttpResponseException
+
+def client = new GroovyHttpClient('https://httpbin.org')
+
+try {
+    client.getSync('/status/404')
+} catch (HttpResponseException e) {
+    println e.message           // HTTP 404 Not Found (GET https://httpbin.org/status/404, 0 bytes)
+    println e.statusCode        // 404
+    println e.responseBody      // the full body, if any
+    println e.header('Date')    // response headers
+} catch (java.net.ConnectException | java.net.http.HttpTimeoutException e) {
+    println "service unreachable: ${e.class.simpleName}"
+}
+----
+
+The message is short and safe to log: it never contains the response body or the query string, which often carry personal data or tokens. Everything else is a field on the exception (<<error-handling>>). The `++*Sync++` methods throw the real exception, never an `ExecutionException` wrapper.
+
+A common pattern is translating HTTP failures into your own exceptions at the edge of your code:
+
+[source,groovy]
+----
+Order fetchOrder(String id) {
+    try {
+        client.getSync(Order, "/orders/${id}")
+    } catch (HttpResponseException e) {
+        if (e.statusCode == 404) throw new OrderNotFound(id)
+        throw new OrderServiceFailure("orders service: HTTP ${e.statusCode}", e)
+    }
+}
+----
+
+=== Response handlers
+
+When some outcomes are normal, say so in the request and get a value back instead of an exception:
+
+[source,groovy]
+----
+def api = new GroovyHttpClient('https://jsonplaceholder.typicode.com')
+
+Post post = api.getSync(Post, '/posts/9999') {
+    response {
+        success   { r -> r.bodyAs(Post) }
+        when(404) { r -> null }                          // "not found" is an answer, not an error
+        failure   { r -> throw r.toException() }         // any other status >= 400
+        exception { Throwable t -> null }                // network failure, timeout...
+    }
+}
+assert post == null
+----
+
+Use the typed verb (here `getSync(Post, ...)`) to receive what a handler returns. Handlers can also be set once on the client for every request -- for example to turn every 401 into your own `SessionExpired` exception. <<response-handlers>> covers status ranges, client-wide handlers and the precedence rules.
+
+=== Typed results
+
+Typed verbs combine with both styles: without handlers, a 2xx body is mapped onto your type and a failure throws as usual; with handlers, the handler's value is returned.
+
+[source,groovy]
+----
+Order order = client.getSync(Order, '/orders/42')                     // throws on 404
+Order maybe = client.getSync(Order, '/orders/42') { response { when(404) { null } } }
+----
+
+=== Problem details
+
+Many APIs report errors as RFC 9457 problem details (`application/problem+json`). They are parsed for you, in both styles:
+
+[source,groovy]
+----
+catch (HttpResponseException e) {
+    if (e.problem) {
+        println "${e.problem.title}: ${e.problem.detail}"
+        println e.problem.extensions.balance           // extra members
+    }
+}
+
+response { when(422) { r -> throw new ValidationFailed(r.problem.detail) } }
+----
+
+=== Which to choose
+
+* Calling a service your code depends on? Let exceptions propagate and translate them at one boundary.
+* Looking something up that may not exist? `when(404) { null }`.
+* Serving cached or default data while a dependency is down? `exception { ... }` plus `when(500..599) { ... }`.
+* The same rule for every request to a service (401 means re-login)? A client-wide handler.

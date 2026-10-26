@@ -1,54 +1,107 @@
-= Groovy HTTP Client Documentation
+= Groovy HTTP Client User Guide
+Will Woodman <will.woodman.softwood@outlook.com>
 :doctype: book
 :toc: left
-:toclevels: 3
+:toclevels: 2
 :sectnums:
+:sectnumlevels: 2
 :icons: font
 :source-highlighter: rouge
-:version: 2.0.0
-:author: Will Woodman
-:email: will.woodman.softwood@outlook.com
+:source-language: groovy
+:version: 2.1.0
+:revnumber: {version}
+:experimental:
+:xrefstyle: short
+:imagesdir: guide/images
 
 include::attributes.adoc[]
 
-[preface]
-== Preface
+[[part-getting-started]]
+= Getting Started
 
-A modern, production-ready HTTP client for Groovy 6 and Java 25+, built on the JDK `HttpClient` and virtual threads, with secure defaults, a comprehensive Groovy DSL and a testing framework.
+include::guide/01-introduction.adoc[]
 
-NOTE: Upgrading from 1.x? Read <<upgrading-2>> first -- 2.0.0 changes several security-relevant defaults.
+include::guide/02-capabilities.adoc[]
 
-include::chapters/01-introduction.adoc[]
+include::guide/03-history.adoc[]
 
-include::chapters/02-architecture.adoc[]
+include::guide/04-quick-start.adoc[]
 
-include::chapters/03-security-config.adoc[]
+include::guide/05-how-it-works.adoc[]
 
-include::chapters/04-url-builder.adoc[]
+[[part-common-usage]]
+= Common Usage
 
-include::chapters/05-groovy-http-client.adoc[]
+include::guide/06-test-sites.adoc[]
 
-include::chapters/06-multipart-uploads.adoc[]
+include::guide/06a-test-platform.adoc[]
 
-include::chapters/07-circuit-breaker.adoc[]
+include::guide/07-creating-a-client.adoc[]
 
-include::chapters/08-testing-mock-server.adoc[]
+include::guide/08-get-requests.adoc[]
 
-include::chapters/09-testing-dsl.adoc[]
+include::guide/08a-rest-patterns.adoc[]
 
-include::chapters/10-testing-trait.adoc[]
+include::guide/09-sending-data.adoc[]
 
-include::chapters/11-examples.adoc[]
+include::guide/10-cookies.adoc[]
 
-include::chapters/12-upgrading-2.0.adoc[]
+include::guide/11-handling-results.adoc[]
 
-[appendix]
-[[api-reference]]
-== API Reference
+include::guide/12-sync-async-streaming.adoc[]
 
-The complete API -- every public class, method and setting -- is in the Groovydoc published with each release (the `-javadoc` artifact on Maven Central), and can be generated locally with `./gradlew groovydoc` (output in `build/docs/groovydoc`). The classes most used directly are `org.softwood.http.GroovyHttpClient` (and its nested `Builder`, `RetryPolicy`, `HttpClientResponse` and exception types), `org.softwood.http.SecurityConfig`, `org.softwood.http.MultipartPart` and `org.softwood.url.URLBuilder`.
+include::guide/13-security-basics.adoc[]
 
-include::chapters/appendix-troubleshooting.adoc[]
+[[part-configuration]]
+= Configuration
 
-[index]
-== Index
+include::guide/14-configuration-model.adoc[]
+
+include::guide/15-client-configuration.adoc[]
+
+include::guide/15a-codecs.adoc[]
+
+include::guide/16-request-configuration.adoc[]
+
+include::guide/17-response-configuration.adoc[]
+
+include::guide/18-verb-forms.adoc[]
+
+include::guide/19-error-handling.adoc[]
+
+[[part-advanced]]
+= Advanced Features
+
+include::guide/20-authentication.adoc[]
+
+include::guide/21-proxies.adoc[]
+
+include::guide/22-streaming.adoc[]
+
+include::guide/23-compression.adoc[]
+
+include::guide/24-resilience.adoc[]
+
+include::guide/25-http3.adoc[]
+
+include::guide/26-interceptors.adoc[]
+
+include::guide/27-url-builder.adoc[]
+
+[[part-logging-testing]]
+= Logging and Testing
+
+include::guide/28-logging.adoc[]
+
+include::guide/29-testing.adoc[]
+
+[[part-reference]]
+= Reference
+
+include::guide/30-examples.adoc[]
+
+include::guide/31-upgrading.adoc[]
+
+include::guide/32-troubleshooting.adoc[]
+
+include::guide/33-api-map.adoc[]

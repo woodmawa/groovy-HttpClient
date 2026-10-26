@@ -1,0 +1,190 @@
+[[resilience]]
+== Retries, Circuit Breaker and Metrics
+
+[[retries]]
+=== Retries
+
+A retry policy repeats a request that failed for a reason likely to pass: a dropped connection, a timeout, a 502 from a restarting service.
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient.RetryPolicy
+
+def policy = new RetryPolicy.Config().tap {
+    maxAttempts 3                          // including the first attempt
+    backoffExponential(200, 2_000, true)   // initial ms, max ms, jitter
+    onIoExceptions(true)                   // connection refused, reset...
+    onTimeouts(true)
+    on5xx(true)                            // or onStatusCodes([502, 503, 504])
+}.build()
+
+def client = GroovyHttpClient.builder(url).retryPolicy(policy).build()
+
+client.getSync('/flaky') { retry { maxAttempts 5; on5xx(true) } }    // per request
+----
+
+[cols="2,4"]
+|===
+|`maxAttempts(n)` |Total attempts, at least 1
+|`backoffExponential(initialMs, maxMs, jitter)` |Delay doubling from `initialMs` up to `maxMs`; with `jitter` each delay is randomised, so many clients do not retry in lockstep
+|`onIoExceptions(boolean)`, `onTimeouts(boolean)` |Retry network failures and timeouts
+|`on5xx(boolean)`, `onStatusCodes(codes)` |Retry these statuses (429 and 503 are common additions)
+|`retryNonIdempotent(boolean)` |Also retry POST and PATCH (off by default)
+|===
+
+Never retried, whatever the policy: POST and PATCH (unless `retryNonIdempotent`), one-shot uploads, streams that have delivered an item, downloads to an `OutputStream` that have written a byte, and failures that would only repeat -- size limits, parse and decoding errors, policy refusals.
+
+TIP: Only enable `retryNonIdempotent` when the server de-duplicates retried requests, for example with an `Idempotency-Key` header.
+
+*Choosing a policy.* Two or three attempts with jittered backoff covers most transient failures. More attempts mostly add load to a service that is already struggling -- that case is the circuit breaker's job.
+
+[[circuit-breaker]]
+=== The circuit breaker
+
+Retries help with failures that last milliseconds. When a service is down for minutes, retrying every request makes things worse: your callers wait, threads and connections pile up, and the struggling service gets hammered as it tries to recover. The circuit breaker detects this and fails fast instead.
+
+Each client has one breaker, covering every request it makes. It has three states (<<circuit-states>>):
+
+* *CLOSED* -- normal. Counted failures (network errors, timeouts, 5xx) build up; any success resets the count.
+* *OPEN* -- after `failureThreshold` failures in a row (default 5). Requests fail immediately with `CircuitOpenException`; nothing is sent.
+* *HALF_OPEN* -- once `resetTimeoutMs` (default 30 s) has passed since the last failure, the next request is let through as a probe. Success closes the breaker; failure opens it again for another `resetTimeoutMs`.
+
+[source,groovy]
+----
+def client = GroovyHttpClient.builder(url).failureThreshold(3).resetTimeoutMs(10_000).build()
+
+try {
+    client.getSync('/orders')
+} catch (GroovyHttpClient.CircuitOpenException e) {
+    return cachedOrders()             // degrade gracefully while the service recovers
+}
+----
+
+Or as a value, with a response handler:
+
+[source,groovy]
+----
+List orders = client.getSync(List, '/orders') {
+    response {
+        success { r -> r.json }
+        exception { Throwable t -> t instanceof GroovyHttpClient.CircuitOpenException ? cachedOrders() : null }
+    }
+}
+----
+
+4xx responses are not failures for the breaker: they are answers. Retries happen inside the breaker, so one request with three attempts counts once.
+
+[[circuit-inspection]]
+=== Inspecting the breaker
+
+[source,groovy]
+----
+import org.softwood.http.GroovyHttpClient.State
+
+client.circuitState                     // State.CLOSED, OPEN or HALF_OPEN
+
+def s = client.circuitBreakerStatus     // a read-only snapshot
+s.state                                 // State.OPEN
+s.failureCount                          // 3
+s.failureThreshold                      // 3
+s.resetTimeout                          // PT10S
+s.openedAt                              // Instant, or null when not open
+s.lastFailureAt                         // Instant, or null
+s.open                                  // true
+s.probeDue                              // true once the reset timeout has passed: the next request is the probe
+----
+
+Because `OPEN` becomes `HALF_OPEN` only when a request arrives, an idle client reads `OPEN` after its reset timeout has passed; `probeDue` tells you the next request will be let through.
+
+*Health checks.* Report the breaker in your application's health endpoint, so an open circuit is visible to operators and load balancers:
+
+[source,groovy]
+----
+Map health() {
+    def s = ordersClient.circuitBreakerStatus
+    [orders: [status: s.open && !s.probeDue ? 'DOWN' : 'UP', circuit: s.state.name(), failures: s.failureCount]]
+}
+----
+
+[[circuit-events]]
+=== Reacting to state changes
+
+Register a listener to be told of every transition -- to log it, raise an alert, or record a metric:
+
+[source,groovy]
+----
+client.onCircuitStateChange { State from, State to ->
+    log.warn("orders circuit ${from} -> ${to}")
+    if (to == State.OPEN) alerts.raise('orders service unavailable')
+    if (to == State.CLOSED) alerts.clear('orders service unavailable')
+}
+----
+
+Listeners run on the thread that caused the change, so keep them quick. A listener that throws is logged and ignored; several listeners may be added.
+
+[[metrics]]
+=== Collecting metrics
+
+Every client counts its traffic (unless built with `enableMetrics(false)`; the `testing()` profile turns it off):
+
+[source,groovy]
+----
+def m = client.metrics.snapshot()
+
+m.requests              // verb calls, including those the breaker rejected
+m.succeeded             // completed with status < 400
+m.failed                // ended in an exception: status 400+, network error, timeout, circuit open
+m.status2xx             // also status1xx, status3xx, status4xx, status5xx
+m.attempts              // requests sent, retries included
+m.retries
+m.timeouts
+m.circuitRejections
+m.failuresByType        // e.g. [HttpResponseException: 4, ConnectException: 1]
+m.averageLatency        // Duration, call to outcome
+m.maxLatency
+
+println m.toMap()       // all of it as a flat map, for logging
+client.metrics.reset()  // zero every counter
+----
+
+A request is counted once, whatever its retries, when its outcome is known -- before response handlers run, so a 404 that a handler turns into `null` still counts as a 4xx failure. Counters are `LongAdder`s; leaving metrics on costs next to nothing.
+
+==== Publishing to Micrometer
+
+Register gauges that read the counters, and a listener for the breaker state:
+
+[source,groovy]
+----
+import io.micrometer.core.instrument.Gauge
+import io.micrometer.core.instrument.MeterRegistry
+
+void bindMetrics(GroovyHttpClient client, String name, MeterRegistry registry) {
+    def m = client.metrics
+    Map<String, Closure<Number>> counters = [
+            'requests'          : { m.snapshot().requests },
+            'failed'            : { m.snapshot().failed },
+            'retries'           : { m.snapshot().retries },
+            'circuit.rejections': { m.snapshot().circuitRejections },
+            'latency.max.ms'    : { m.snapshot().maxLatency.toMillis() }
+    ]
+    counters.each { metric, read ->
+        Gauge.builder("http.client.${metric}", m, { read() as double }).tag('client', name).register(registry)
+    }
+    Gauge.builder('http.client.circuit.open', client, { it.circuitState == State.OPEN ? 1d : 0d })
+         .tag('client', name).register(registry)
+}
+----
+
+For per-request timings with percentiles (rather than totals), use an interceptor to record each attempt into a Micrometer `Timer` (<<interceptors>>).
+
+==== Logging a summary
+
+Without a metrics system, log a snapshot periodically and reset, so each line covers one interval:
+
+[source,groovy]
+----
+scheduler.scheduleAtFixedRate({
+    log.info("orders client: ${client.metrics.snapshot().toMap()}")
+    client.metrics.reset()
+}, 1, 1, TimeUnit.MINUTES)
+----

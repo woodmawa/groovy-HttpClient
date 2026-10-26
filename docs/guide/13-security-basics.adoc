@@ -1,0 +1,166 @@
+[[security-basics]]
+== Security
+
+An HTTP client sits on a trust boundary: it sends your credentials and data out, and lets other systems' data in. The library is built so that the safe behaviour is the default and the unsafe one needs a deliberate, visible decision.
+
+=== What the client protects you from
+
+[cols="2,3,3"]
+|===
+|Threat |What could happen |What the client does
+
+|*Interception* (man in the middle)
+|Someone between you and the server reads or alters traffic, including tokens.
+|Certificates and host names are verified on every TLS connection; TLS 1.2+ only (`production()`: 1.3). Turning verification off takes `trustAll()` and logs a warning.
+
+|*Server-side request forgery* (SSRF)
+|A URL from user input makes your service call an internal system (`+http://169.254.169.254/...+`).
+|Absolute URLs are refused by default; requests and every redirect hop may only reach allowed hosts.
+
+|*Credential leakage*
+|A redirect, a log line or an exception message carries a token somewhere it should not go.
+|Credentials go only to the base URL's origin and are removed on cross-origin redirects; HTTPS never redirects to HTTP; logs and messages never contain headers, bodies or query strings.
+
+|*Resource exhaustion*
+|A huge, endless or highly compressed ("zip bomb") response exhausts memory.
+|Bodies are limited (10 MB by default), counted as they arrive and after decompression; stream items are limited separately.
+
+|*Injection*
+|A value from a user adds headers or cookies (`"a\r\nX-Admin: true"`, `"x; admin=1"`).
+|Cookie values, multipart headers and other header-bound values are validated.
+
+|*XML attacks* (XXE, billion laughs)
+|A malicious XML response reads local files or explodes in memory.
+|The XML parser refuses DOCTYPE declarations and external entities.
+
+|*Silent misconfiguration*
+|A misspelt setting leaves an unsafe default in place.
+|Unknown settings are refused when the client is built.
+|===
+
+You get all of this from `new GroovyHttpClient(url)`. What you configure is mostly *who to trust*: which certificates, which hosts.
+
+[[dev-security]]
+=== Setting up security in development
+
+The temptation in development is to switch verification off. Don't: it hides the configuration you will need in production, and `trustAll()` code has a way of reaching production. Instead, give your development set-up real certificates. The library ships scripts that make this a few commands.
+
+==== The SSL tools
+
+Six scripts -- a `.sh` for Linux and Mac and a `.bat` for Windows of each -- live in `src/main/resources/ssl-tools/` in the source repository and are packaged in the library jar under `ssl-tools/`. To get them from the jar:
+
+[source,shell,subs="attributes+"]
+----
+jar xf ~/.m2/repository/io/github/woodmawa/{project-artifact}/{project-version}/{project-artifact}-{project-version}.jar ssl-tools/
+chmod +x ssl-tools/*.sh
+----
+
+[cols="2,4"]
+|===
+|`create_keystore` |Generate a PKCS12 keystore with a key pair and a self-signed certificate -- the server side of a local HTTPS set-up.
+|`import_certificate` |Import a certificate (a CA's, or a self-signed server's) into a PKCS12 *truststore* -- what the client is told to trust.
+|`convert_pem_to_p12` |Turn a PEM certificate and private key (from OpenSSL, mkcert or your PKI team) into a PKCS12 keystore -- for a client certificate (mutual TLS).
+|===
+
+All three need `keytool` (part of the JDK); `convert_pem_to_p12` also needs `openssl`. Run any of them with `--help` for the full options.
+
+==== Scenario 1: a local HTTPS server with a self-signed certificate
+
+You run a service locally over HTTPS and want the client to trust it properly.
+
+[source,shell]
+----
+# 1. the server's keystore: key pair + self-signed certificate for localhost
+./create_keystore.sh --type development --output dev-server.p12 --password changeit --hostname localhost
+
+# 2. export the server certificate
+keytool -exportcert -keystore dev-server.p12 -storepass changeit -alias dev-cert -rfc -file dev-server.crt
+
+# 3. a truststore for the client containing that certificate
+./import_certificate.sh --cert dev-server.crt --truststore dev-truststore.p12 --password changeit
+----
+
+Point your local server at `dev-server.p12` (in Spring Boot: `server.ssl.key-store`), and the client at the truststore:
+
+[source,groovy]
+----
+import java.security.KeyStore
+
+KeyStore loadPkcs12(String file, String password) {
+    def ks = KeyStore.getInstance('PKCS12')
+    new File(file).withInputStream { ks.load(it, password.toCharArray()) }
+    ks
+}
+
+def client = new GroovyHttpClient(SecurityConfig.testing('https://localhost:8443')
+        .withOverrides(trustStore: loadPkcs12('dev-truststore.p12', 'changeit')))
+----
+
+Certificates and host names are verified exactly as in production; only the trusted certificate differs.
+
+==== Scenario 2: your organisation's private CA
+
+Internal services use certificates from a company CA that the JDK does not know. Import the CA certificate once:
+
+[source,shell]
+----
+./import_certificate.sh --cert company-root-ca.crt --truststore company-truststore.p12 --password "$TRUST_PASS"
+----
+
+[source,groovy]
+----
+def client = GroovyHttpClient.builder('https://orders.internal.example.com')
+        .trustStore(loadPkcs12('company-truststore.p12', System.getenv('TRUST_PASS')))
+        .build()
+----
+
+Trusting the CA (rather than each server) means every internal service it issues for works without further steps. If you are behind an SSL-inspecting proxy, import the proxy's CA the same way (see the SSL certificate guide, `SSL_CERTIFICATE_GUIDE.md`).
+
+==== Scenario 3: a client certificate (mutual TLS)
+
+The service requires you to present a certificate. Your PKI team (or `mkcert`, or OpenSSL) gives you a PEM certificate and key:
+
+[source,shell]
+----
+./convert_pem_to_p12.sh --input client-cert.pem --key client-key.pem --output client.p12 --password "$CLIENT_PASS"
+----
+
+[source,groovy]
+----
+import javax.net.ssl.KeyManagerFactory
+
+def kmf = KeyManagerFactory.getInstance(KeyManagerFactory.defaultAlgorithm)
+kmf.init(loadPkcs12('client.p12', System.getenv('CLIENT_PASS')), System.getenv('CLIENT_PASS').toCharArray())
+
+def client = GroovyHttpClient.builder('https://partner.example.com')
+        .keyManagers(kmf.keyManagers)
+        .trustStore(loadPkcs12('partner-ca.p12', System.getenv('TRUST_PASS')))
+        .build()
+----
+
+==== From development to production
+
+[cols="1,3"]
+|===
+|Development |`SecurityConfig.testing(url)` plus a development truststore. Verification on, logging on, no retries.
+|CI |The same, with the truststore and passwords from CI secrets.
+|Staging |`SecurityConfig.staging(url)`; the organisation truststore; logging on.
+|Production |`SecurityConfig.production(url)`; TLS 1.3; truststore and passwords from your secrets store; no logging of requests unless you need it.
+|===
+
+The code is the same in every environment; only the profile and the stores change -- which is the point of not using `trustAll()` in development.
+
+Good habits:
+
+* Keep keystores and truststores out of version control (add `++*.p12++` to `.gitignore`), and passwords in environment variables or a secrets manager.
+* Give development certificates short validity (`--validity 90`) and the right host name (`--hostname`).
+* Use a separate truststore per environment rather than one that trusts everything.
+
+=== Settings you will change
+
+* *Who to trust:* `trustStore(...)` (above).
+* *Bigger responses:* `maxResponseBytes(100_000_000L)` on the builder, `maxResponseBytes n` on one request -- or download to a file instead.
+* *More hosts:* `allowAbsoluteUrls(true)` and `allowedHosts([...] as Set)` (<<creating-a-client>>).
+* *Stricter TLS:* `allowedTlsProtocols(['TLSv1.3'])`, `allowedCipherSuites([...])` (<<client-tls>>).
+
+WARNING: `SecurityConfig.trustAll(url)` accepts any certificate. Use it only for throwaway local debugging; it logs a warning every time a client is created with it.

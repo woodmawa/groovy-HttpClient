@@ -1,0 +1,58 @@
+[[upgrading]]
+== Upgrading
+
+[[upgrading-2-1]]
+=== From 2.0 to 2.1
+
+2.1 is source-compatible with 2.0, and every new capability is opt-in. Check five behaviour changes:
+
+[cols="3,3,3"]
+|===
+|Change |Who notices |What to do
+
+|`HttpResponseException.message` has no response body
+|Code or alerts matching on message text
+|Read `responseBody`, `bodyAs(...)` or `problem`; or set `errorBodyPreviewChars`
+
+|The client's own size limit raises `ResponseTooLargeException`
+|Code checking `statusCode == 413` for that case
+|Catch the subclass (status is still 413)
+
+|Query values are encoded once (`&`, `=`, `/`, `?`, non-ASCII arrive intact)
+|Servers or tests that worked around double encoding
+|Remove the workaround
+
+|`addCookie` sends RFC 6265 cookies (no `$Version`)
+|Servers expecting RFC 2965 attributes
+|None expected
+
+|Multipart text and JSON parts are plain form fields: `MultipartPart.text/json` and DSL `content` parts no longer get a generated filename (`name.txt`)
+|Servers that read those parts as file uploads
+|Read them as fields, or give the part a `filename`
+|===
+
+Three 2.0 bugs are fixed: a name of yours (a constant, say) used inside a request closure could send a stray `GET /<name>`; an oversized body on HTTP/2 or HTTP/3 surfaced as a retryable `IOException`; and `@CompileStatic` code could not use the request DSL. `MockHttpServer.withDelay` is now honoured. If you copied the test helpers into your project, depend on the published fixtures instead (<<published-fixtures>>).
+
+New settings (`compression`, `maxStreamItemBytes`, `errorBodyPreviewChars`, the proxy keys) need 2.1, because `SecurityConfig` refuses unknown names.
+
+`enableMetrics`, accepted but unused in 2.0, now switches the per-client counters in `client.metrics` (on by default, off in `testing()` and `trustAll()`). The circuit breaker can now be inspected (`circuitState`, `circuitBreakerStatus`) and observed (`onCircuitStateChange`). The `import_certificate.sh` SSL tool, which in 2.0 contained the Windows batch script by mistake, now works on Linux and Mac.
+
+[[upgrading-2]]
+=== From 1.x to 2.0
+
+2.0 requires Java 25 and Groovy 6 and changed several security-relevant defaults:
+
+[cols="2,4"]
+|===
+|TLS |`new GroovyHttpClient(url)` verifies certificates (1.x accepted any). `testing()` verifies too; only `trustAll()` does not. `trustStore`, `trustManagers` and `keyManagers` take effect (1.x ignored them).
+|Settings |Unknown `SecurityConfig` names are refused; explicit `false` and `0` are honoured (1.x treated them as "use the default").
+|Redirects |Followed by the library, each hop checked against `allowedHosts`, never HTTPS to HTTP, credentials removed across origins.
+|Exceptions |`++*Sync++` methods throw the real exception, not `ExecutionException`.
+|Retries |5xx retries work; POST and PATCH are retried only with `retryNonIdempotent(true)`.
+|Interceptors |Receive 4xx and 5xx as responses, not exceptions.
+|Request DSL |Per-request settings such as `timeout(...)` apply to every attempt; an unsupported call fails instead of being ignored.
+|Validation |Cookie values and multipart headers are checked for injection.
+|Circuit breaker |Half-open admits a single probe.
+|Logging |No bundled backend: add your own SLF4J binding.
+|Lifecycle |`close()` releases the underlying `HttpClient`.
+|===

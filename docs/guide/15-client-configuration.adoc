@@ -1,0 +1,301 @@
+[[client-configuration]]
+== Client Configuration
+
+Client configuration decides how a client connects to its service and how it behaves when things go wrong. It is grouped into areas below. Each area says *what it controls*, *when to change it*, its settings -- the builder method, the `SecurityConfig` key where it differs, and the default -- and an example.
+
+[cols="2,4"]
+|===
+|Area |Controls
+
+|<<client-hosts>> |Which URLs the client may call
+|<<client-timeouts>> |How long it waits
+|<<client-protocol>> |HTTP/1.1, HTTP/2 or HTTP/3
+|<<client-tls>> |Who it trusts and how it proves its own identity
+|<<client-proxy>> |The route to the service
+|<<client-redirects>> |Whether and how far it follows redirects
+|<<client-cookies>> |Which cookies it keeps
+|<<client-content>> |How bodies are encoded, parsed and compressed
+|<<client-auth>> |The credentials it sends
+|<<client-defaults>> |Headers and response handling for every request
+|<<client-resilience>> |Retries and the circuit breaker
+|<<client-limits>> |Size limits
+|<<client-observability>> |Logging and metrics
+|<<client-profiles>> |Ready-made combinations
+|===
+
+[[client-hosts]]
+=== Base URL and allowed hosts
+
+*Controls:* where requests can go -- the base every path is appended to, and the hosts that requests and redirects may reach. This is your protection against server-side request forgery.
+
+*Change it when:* the API has a path prefix (put it in the base URL), or one client must call several hosts.
+
+[cols="3,2,4"]
+|===
+|Setting |Default |Notes
+
+|`builder(baseUrl)` (`baseUrl`) |required |Absolute `http` or `https` URL, optionally with a path (`+https://api.example.com/v2+`)
+|`allowAbsoluteUrls(boolean)` |`false` |Allow full URLs as request paths
+|`allowedHosts(Set<String>)` |the base URL's host |Hosts that requests and every redirect hop may reach
+|===
+
+[source,groovy]
+----
+GroovyHttpClient.builder('https://api.example.com/v2')
+        .allowAbsoluteUrls(true)
+        .allowedHosts(['api.example.com', 'cdn.example.com'] as Set)
+        .build()
+----
+
+[[client-timeouts]]
+=== Connection and timeouts
+
+*Controls:* how long the client waits before giving up -- on a connection, and on the server's answer.
+
+*Change it when:* always consider it for production. Set the connect timeout short (the service is either reachable or not), and the request timeout to the service's slowest normal response plus a margin. Too long, and a slow dependency ties up your callers; too short, and you fail requests that would have succeeded.
+
+[cols="3,2,4"]
+|===
+|`connectTimeout(Duration)` |10 s |TCP and TLS connection set-up
+|`requestTimeout(Duration)` |30 s |Until the response headers arrive. The body is then bounded by `idleTimeout` (per request) and the size limit.
+|===
+
+A single slow request can override the request timeout: `timeout Duration.ofMinutes(2)` in its closure. The wait of a `++*Sync++` call is separate (30 s by default, or the `Duration` you pass).
+
+[[client-protocol]]
+=== Protocol
+
+*Controls:* which HTTP version the client prefers. HTTP/2 multiplexes many requests over one connection; HTTP/3 runs over QUIC (UDP), which recovers better from packet loss on poor networks.
+
+*Change it when:* a server misbehaves with HTTP/2 (force `HTTP_1_1`), or you want HTTP/3 where it is offered.
+
+[cols="3,2,4"]
+|===
+|`httpVersion(v)` |`HTTP_2` |`HttpVersion.HTTP_1_1`, `HTTP_2` or `HTTP_3`; also `'HTTP/1.1'`, `'HTTP/2'`, `'HTTP/3'`
+|`http3()` / `http3(Http3Discovery)` (`http3Discovery`) |off |Prefer HTTP/3 with discovery `ANY` (default), `ALT_SVC` or `HTTP_3_URI_ONLY`; see <<http3>>
+|===
+
+HTTP/2 is negotiated, so a server that only speaks HTTP/1.1 still works with the default.
+
+[[client-tls]]
+=== TLS
+
+*Controls:* which servers the client trusts, how it proves its own identity, and which TLS versions and ciphers it accepts.
+
+*Change it when:* the service uses a private or self-signed certificate (trust store), requires a client certificate (key managers), or your security policy restricts protocols and ciphers.
+
+[cols="3,2,4"]
+|===
+|`trustStore(KeyStore)` |JVM default (public CAs) |CAs or certificates to trust
+|`trustManagers` (key only) |none |Custom trust managers, instead of a trust store
+|`keyManagers(KeyManager...)` |none |Your client certificate, for mutual TLS
+|`sslContext(SSLContext)` |built for you |A complete context; overrides the three above
+|`allowedTlsProtocols(List)` |`TLSv1.3`, `TLSv1.2` |`production()` uses TLS 1.3 only
+|`allowedCipherSuites(List)` |JVM default |Restrict cipher suites
+|`enforceHostnameVerification(boolean)` |`true` |Check the certificate matches the host name
+|`insecureAllowed(boolean)` |`false` |Accept any certificate; only `trustAll()` sets it. Never in production.
+|===
+
+[source,groovy]
+----
+def kmf = KeyManagerFactory.getInstance(KeyManagerFactory.defaultAlgorithm)
+kmf.init(clientKeyStore, keyPassword)
+
+GroovyHttpClient.builder('https://partner.example.com')
+        .trustStore(partnerCaStore)
+        .keyManagers(kmf.keyManagers)
+        .allowedTlsProtocols(['TLSv1.3'])
+        .build()
+----
+
+<<dev-security>> shows how to create the stores; `SSL_CERTIFICATE_GUIDE.md` in the repository goes further.
+
+[[client-proxy]]
+=== Proxy
+
+*Controls:* whether requests go direct or through an HTTP proxy, and with what credentials.
+
+*Change it when:* your network requires a proxy the JVM is not already configured for, some hosts must bypass it, or you need to ignore the JVM's proxy settings.
+
+[cols="3,2,4"]
+|===
+|`proxy(host, port)` (`proxyHost`, `proxyPort`) |JVM settings |An explicit HTTP proxy
+|`proxyAuth(user, password)` (`proxyUser`, `proxyPassword`) |none |Basic proxy credentials
+|`nonProxyHosts(String...)` |none |Hosts that bypass the proxy; `++*++` wildcards
+|`noProxy()` |off |Connect directly, ignoring JVM settings
+|===
+
+See <<proxies>> for HTTPS tunnels and the JVM property Basic proxy authentication needs.
+
+[[client-redirects]]
+=== Redirects
+
+*Controls:* whether 3xx responses are followed, and how many hops.
+
+*Change it when:* you need the 3xx response itself (to read `Location` after creating something), or a service legitimately chains more than five redirects.
+
+[cols="3,2,4"]
+|===
+|`allowRedirects(boolean)` |`true` |`false` returns the 3xx response to you
+|`maxRedirects(int)` |5 |More hops raise `RedirectRejectedException`
+|===
+
+Every hop is checked against the allowed hosts, HTTPS never redirects to HTTP, and credentials and cookies are removed when the origin changes. How the method and body change is described in <<redirects-after-post>>.
+
+[[client-cookies]]
+=== Cookies
+
+*Controls:* which cookies set by servers are kept and sent back.
+
+*Change it when:* you want a stateless client (`ACCEPT_NONE`) or are testing against local servers (`ACCEPT_ALL`).
+
+[cols="3,2,4"]
+|===
+|`cookiePolicy(CookiePolicy)` |`ACCEPT_ORIGINAL_SERVER` |See <<cookies>>
+|===
+
+[[client-content]]
+=== Content: codecs and compression
+
+*Controls:* how request values become bytes, how response bytes become values, and whether responses are compressed in transit.
+
+*Change it when:* a service uses a media type the built-in codecs do not cover (a vendor JSON type is already covered by the `{plus}json` suffix), you want Jackson with your own `ObjectMapper`, or the service serves gzip and you want to save bandwidth.
+
+[cols="3,2,4"]
+|===
+|`codecs { ... }` / `codecs(CodecRegistry)` |built-ins |Add or replace encoders and parsers; see <<codecs>>
+|`compression(boolean)` |`false` |Accept and decode gzip and deflate; see <<compression>>
+|===
+
+[source,groovy]
+----
+GroovyHttpClient.builder(url)
+        .codecs { parser 'application/x-yaml', { String text -> yaml.load(text) } }
+        .compression(true)
+        .build()
+----
+
+[[client-auth]]
+=== Authentication
+
+*Controls:* the credentials sent with every request, and where they may go.
+
+*Change it when:* the service needs credentials. Set them here rather than as a default header, so they get origin scoping, per-attempt refresh and redirect stripping.
+
+[source,groovy]
+----
+GroovyHttpClient.builder(url).auth { bearer { -> tokens.current() } }.build()
+client.auth { basic 'user', secret }              // replace later; null clears
+----
+
+See <<authentication>>.
+
+[[client-defaults]]
+=== Default headers and response handlers
+
+*Controls:* headers added to every request, and response handlers applied to every request.
+
+*Change it when:* every request needs the same header (client identification, an API version), or the same outcome means the same thing everywhere (401 means the session expired).
+
+[source,groovy]
+----
+client.withHeader('X-Client', 'orders-service')
+GroovyHttpClient.builder(url).response { when(401) { r -> throw new SessionExpired() } }.build()
+client.defaultResponse { when(503) { r -> null } }
+----
+
+See <<creating-a-client>> and <<response-handlers>>.
+
+[[client-resilience]]
+=== Resilience: retries and the circuit breaker
+
+*Controls:* what happens when a call fails. Retries repeat a failed request after a pause, which rides out brief failures. The circuit breaker stops calling a service that keeps failing, so your application fails fast instead of piling up waiting requests, and the service gets room to recover.
+
+*Change it when:* in production, always decide. Retry transient failures of idempotent requests; tune the breaker to how quickly you want to stop calling a broken service, and how often to check whether it is back.
+
+[cols="3,2,4"]
+|===
+|`retryPolicy(RetryPolicy)` |none |Attempts, backoff, what to retry; see <<resilience>>
+|`failureThreshold(int)` |5 |Failures in a row that open the breaker
+|`resetTimeoutMs(long)` |30 000 |How long the breaker stays open before letting a probe request through
+|===
+
+[[circuit-states]]
+==== The circuit breaker states
+
+[cols="1,4"]
+|===
+|`CLOSED` |Normal: every request is sent. Network errors, timeouts and 5xx responses count as failures; any success resets the count. 4xx responses are answers and are not counted.
+|`OPEN` |Reached after `failureThreshold` failures in a row. Every request fails at once with `CircuitOpenException`, with no network call.
+|`HALF_OPEN` |Once `resetTimeoutMs` has passed since the last failure, the next request is let through as a probe; others are rejected while it runs. If it succeeds the breaker closes; if it fails, it opens again.
+|===
+
+----
+          failures >= threshold                 reset timeout passes, next request
+ CLOSED  ----------------------->  OPEN  -------------------------------------->  HALF_OPEN
+   ^                                 ^                                               |
+   |          probe succeeds         |                probe fails                    |
+   +---------------------------------+-----------------------------------------------+
+----
+
+The move from `OPEN` to `HALF_OPEN` happens when a request arrives, so a client that is not being used stays `OPEN` until its next request. Inspect the state as described in <<circuit-inspection>>.
+
+Choosing values: a threshold of 3 to 10 avoids opening on one unlucky request; a reset timeout of 10 to 60 seconds gives a restarting service time to come up without leaving your application cut off for long. Retries happen inside the breaker, so a request with three attempts counts as one failure.
+
+[[client-limits]]
+=== Limits
+
+*Controls:* how much data the client accepts, protecting your memory from huge or endless responses.
+
+*Change it when:* the service legitimately returns more than 10 MB (raise it, or better, stream), or long-lived event streams carry large items.
+
+[cols="3,2,4"]
+|===
+|`maxResponseBytes(long)` |10 MB |Per body; decompressed bytes with compression, bytes written for downloads. `Long.MAX_VALUE` for none.
+|`maxStreamItemBytes(long)` |1 MiB |Per line, event or NDJSON value in a stream consumer
+|`errorBodyPreviewChars(int)` |0 |Characters of the body in exception messages, 0 to 4096; keep 0 in production
+|===
+
+[[client-observability]]
+=== Observability: logging and metrics
+
+*Controls:* what the client tells you about its traffic -- log lines per request, and counters you can publish.
+
+*Change it when:* turn logging on to diagnose a problem or in non-production environments; keep metrics on (the default) and publish them to your monitoring.
+
+[cols="3,2,4"]
+|===
+|`enableLogging(boolean)` |`false` |A credential-safe log line per request, retry and redirect; see <<logging>>
+|`enableMetrics(boolean)` |`true` |Per-client counters in `client.metrics`; see <<metrics>>
+|===
+
+[source,groovy]
+----
+def client = GroovyHttpClient.builder(url).enableLogging(true).build()
+println client.metrics.snapshot()        // requests, outcomes, status classes, retries, latency...
+----
+
+[[client-profiles]]
+=== Profiles
+
+*Controls:* nothing by itself -- a profile is a ready-made combination of the settings above. Start from the closest one and override what differs.
+
+[cols="1,1,1,1,1,1"]
+|===
+| |`defaults` |`production` |`staging` |`testing` |`trustAll`
+
+|Certificates verified |yes |yes |yes |yes |*no*
+|TLS protocols |1.3, 1.2 |1.3 |1.3 |1.3, 1.2 |1.3, 1.2
+|Connect / request timeout |10 s / 30 s |5 s / 20 s |5 s / 30 s |10 s / 30 s |3 s / 30 s
+|Retries |none |3 attempts |3 attempts |none |2 attempts
+|Absolute URLs |no |no |no |yes |yes
+|Cookie policy |original server |original server |original server |accept all |accept all
+|Logging |off |off |on |on |on
+|Metrics |on |on |on |off |off
+|Error body in message |0 |0 |0 |120 chars |0
+|===
+
+[source,groovy]
+----
+new GroovyHttpClient(SecurityConfig.production(url).withOverrides(requestTimeout: Duration.ofSeconds(60)))
+----

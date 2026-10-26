@@ -1,0 +1,139 @@
+[[testing]]
+== Testing Your Code
+
+The library's own testing tools are published as *test fixtures*, so your tests can run against a real local HTTP server instead of mocks of the client. They are incubating: the API may still change before 3.0. This chapter is the reference; <<test-platform>> is a guided tour with worked examples.
+
+[[published-fixtures]]
+=== Adding the fixtures
+
+.Gradle
+[source,groovy,subs="attributes+"]
+----
+testImplementation testFixtures('{project-group}:{project-artifact}:{project-version}')
+----
+
+.Maven
+[source,xml,subs="attributes+"]
+----
+<dependency>
+    <groupId>{project-group}</groupId>
+    <artifactId>{project-artifact}</artifactId>
+    <version>{project-version}</version>
+    <classifier>test-fixtures</classifier>
+    <scope>test</scope>
+</dependency>
+----
+
+[cols="2,4"]
+|===
+|`MockHttpServer` |A real HTTP server with canned responses per method and path, and a record of what it received. Works with any test framework.
+|`HttpClientTestDsl` |A fluent layer: `when('/path').respondWith { ... }` and `verify('/path').wasCalled()...`
+|`HttpClientTestTrait` |Brings the DSL into a Spock specification, with server lifecycle handled for you
+|===
+
+All three serve plain HTTP on a free local port; create the client with `SecurityConfig.testing(url)`, which allows `+http://localhost+` and puts the start of error bodies into exception messages.
+
+=== Asynchronous tests
+
+Wait for futures with Groovy 6's `await` (it rethrows the original exception), and for side effects -- requests reaching the server, callbacks, listeners -- with Awaitility, written as `Awaitility.await()` because Groovy 6's own `await` shadows the static import. Worked examples are in <<async-testing>>.
+
+=== MockHttpServer
+
+[source,groovy]
+----
+import org.softwood.test.MockHttpServer
+
+class OrderClientSpec extends Specification {
+    MockHttpServer server = new MockHttpServer()
+    def setup()   { server.init() }
+    def cleanup() { server.shutdown() }
+
+    def "creates an order"() {
+        given:
+        def check = server.addRequestCheck('POST', '/orders', 201)
+                .withResponseBody('{"id":42}')
+                .withResponseHeaders(['Content-Type': 'application/json'])
+        def client = new GroovyHttpClient(SecurityConfig.testing("http://localhost:${server.port}"))
+
+        when:
+        def r = client.postSync('/orders', null) { json([sku: 'A1']) }
+
+        then:
+        r.json.id == 42
+        check.lastRequest.header('Content-Type').startsWith('application/json')
+        check.lastRequest.bodyText == '{"sku":"A1"}'
+        check.received.size() == 1
+    }
+}
+----
+
+[cols="2,4"]
+|===
+|`addRequestCheck(method, path, status)` |Respond to `method path` with `status`
+|`withResponseBody(String)` / `withResponseBytes(byte[])` |The body (bytes for binary or gzip content)
+|`withResponseHeaders(Map)` / `withResponseCookies(Map)` |Response headers and cookies
+|`withExpectedHeaders(Map)` / `withExpectedCookies(Map)` |Answer 400 unless the request carries these
+|`withDelay(ms)` |Wait before answering (timeouts, slow servers)
+|`received`, `lastRequest` |What arrived: `method`, `uri`, `rawQuery`, `query`, `form`, `header(name)`, `body`, `bodyText`
+|===
+
+=== HttpClientTestDsl
+
+[source,groovy]
+----
+import org.softwood.http.HttpClientTestDsl
+
+def server = HttpClientTestDsl.create().start()
+
+server.when('/users/1').respondWithJson([id: 1, name: 'Alice'])
+server.when('/users/2').respondWithStatus(404)
+server.when('/search').respondWith {
+    status 200
+    contentType 'text/plain'
+    body 'found'
+}
+
+def client = server.createClient()          // a client for the server's base URL
+client.getSync('/users/1')
+
+server.verify('/users/1').wasCalled(1).withMethod('GET').withHeader('Accept')
+server.verify('/users/3').wasNotCalled()
+server.recordedRequests.size()              // everything received, in order
+
+server.close()
+----
+
+`respondWith` closures can set `status`, `contentType`, `header(name, value)` and the body with `body`, `json`, `xml`, `text` or `html`. Verifications can also check `withQueryParam`, `withBody`, `withBodyContaining` and `withJsonBody { json -> ... }`; `first()` and `last()` return recorded requests.
+
+=== HttpClientTestTrait
+
+[source,groovy]
+----
+import org.softwood.http.HttpClientTestTrait
+
+class UserServiceSpec extends Specification implements HttpClientTestTrait {
+
+    def "fetches a user"() {
+        given:
+        testServer.when('/users/1').respondWithJson([id: 1, name: 'Alice'])
+        def client = createTestClient()
+
+        expect:
+        client.getSync('/users/1').json.name == 'Alice'
+        testServer.verify('/users/1').wasCalled()
+    }
+}
+----
+
+The trait starts one server, lazily, shared by all features of the specification, and provides:
+
+[cols="2,4"]
+|===
+|`testServer`, `testServerUrl` |The `HttpClientTestDsl` server and its base URL
+|`createTestClient()` |A client using `SecurityConfig.testing(...)`; `createTestClient { requestTimeout = Duration.ofSeconds(1) }` overrides settings
+|`mockEndpoint(path) { ... }` |Shorthand for `testServer.when(path).respondWith { ... }`
+|`verifyRequest(path)`, `recordedRequests` |Shorthands for verification and the recorded requests
+|`resetTestServer()`, `stopTestServer()` |Clear endpoints and recordings; stop the server
+|===
+
+Call `resetTestServer()` in `setup()` when features must not see each other's endpoints and recordings.

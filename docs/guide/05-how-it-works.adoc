@@ -1,0 +1,158 @@
+[[how-it-works]]
+== How the Client Works
+
+[[core-classes]]
+=== The core classes
+
+[.text-center]
+image::core-classes.svg[Core classes of the Groovy HTTP Client,width=100%]
+
+You work with a handful of classes:
+
+[cols="2,5"]
+|===
+|`GroovyHttpClient` |The client: one per base URL, holding the connection, TLS and protocol set-up, cookies, default headers and interceptors. Its verb methods (`get`, `postSync`, `download`...) send requests.
+|`GroovyHttpClient.Builder`, `SecurityConfig` |Two ways to configure a client: fluently, or as a settings object you can start from a profile and override.
+|`GroovyRequestBuilder` |The object behind the request closure -- the request DSL. You rarely name it; you call its methods inside `{ }`.
+|`HttpClientResponse` |What a plain verb returns: status, headers, body, and parsed views of the body.
+|`CodecRegistry` |Converts request values to bytes and response bytes to values, by media type.
+|`ResponseHandlers` |The `response { }` DSL that turns outcomes into values.
+|`StreamResult`, `SseEvent`, `StreamControl` |The streaming results and controls.
+|`HttpResponseException` and friends |Failures, with all their detail as fields.
+|===
+
+Underneath is the JDK's own `java.net.http.HttpClient`, so HTTP/2, HTTP/3, TLS and proxies are the platform's implementations; the library adds the DSL, the security policy, content handling, resilience and streaming around it.
+
+=== The request pipeline
+
+Each request passes through the same stages. Knowing the order explains most of the behaviour described later.
+
+----
+your request closure       headers, query, body, auth, response { }, per-request settings
+circuit breaker            refuses at once while open
+retry loop                 attempts with backoff (never for one-shot uploads or delivered streams)
+your interceptors          first added = outermost
+credentials                added per attempt, to the base URL's origin only
+redirect follower          every hop checked against allowed hosts; credentials removed across origins
+JDK HttpClient             HTTP/1.1, HTTP/2 or HTTP/3; TLS; proxy
+bounded body reader        decompress -> count against the size limit -> memory, file or your consumer
+status check               400 and above become HttpResponseException
+response handlers          success / when / failure / exception -> the value you get back
+----
+
+So retries see real 4xx/5xx responses, handlers run once on the final outcome, the size limit holds for compressed and streamed bodies alike, and credentials never follow a redirect to another site.
+
+[[dsl]]
+=== The DSL
+
+The request DSL is the heart of the library. Compare the same request written against the JDK client directly:
+
+[source,groovy]
+----
+// JDK HttpClient
+def body = JsonOutput.toJson([sku: 'A1', qty: 2])
+def query = 'tenant=' + URLEncoder.encode(tenant, UTF_8) + '&dryRun=true'
+def request = HttpRequest.newBuilder(URI.create("https://api.example.com/orders?${query}"))
+        .header('Content-Type', 'application/json')
+        .header('Authorization', 'Bearer ' + token)
+        .timeout(Duration.ofSeconds(10))
+        .POST(HttpRequest.BodyPublishers.ofString(body))
+        .build()
+def response = jdkClient.send(request, HttpResponse.BodyHandlers.ofString())
+if (response.statusCode() >= 400) throw new RuntimeException("HTTP ${response.statusCode()}")
+def order = new JsonSlurper().parseText(response.body())
+----
+
+[source,groovy]
+----
+// Groovy HTTP Client
+def order = client.postSync('/orders', null) {
+    query(tenant: tenant, dryRun: true)
+    json([sku: 'A1', qty: 2])
+    timeout Duration.ofSeconds(10)
+}.json
+----
+
+The second version says *what* the request is; encoding, headers, credentials, status checking and parsing follow from it.
+
+==== How it works
+
+A verb's last argument is a Groovy closure. The client creates a `GroovyRequestBuilder`, makes it the closure's *delegate* with the `DELEGATE_FIRST` strategy, and runs the closure. Inside the closure:
+
+* calls such as `query(...)`, `header ...` and `json(...)` go to the request builder, which records them;
+* every other name -- your local variables, fields, constants and methods -- resolves to your own code as usual;
+* a call the builder does not recognise fails with `MissingMethodException`, so a typo is caught rather than silently ignored.
+
+When the closure returns, the client turns what was recorded into an `HttpRequest` and sends it through the pipeline above.
+
+[source,groovy]
+----
+static final String TENANT = 'acme'
+
+List<String> openOrders(String status) {
+    client.getSync('/orders') {
+        query(tenant: TENANT, status: status)      // TENANT and status are yours
+        header 'Accept', 'application/json'
+    }.json*.id
+}
+----
+
+The same pattern is used throughout, so once you know one block you know them all:
+
+[cols="2,4"]
+|===
+|`client.getSync(path) { ... }` |the request
+|`auth { ... }` |credentials (client, builder or request)
+|`response { ... }` |response handlers
+|`retry { ... }` |a retry policy for one request
+|`codecs { ... }` |content encoders and parsers, on the builder
+|`postMultipart(path) { b -> b.part { ... } }` |multipart parts
+|===
+
+==== What it gives you
+
+* *Readable requests.* A request reads as a description of the request; there is no builder chain to finish and no `send` to forget.
+* *Defaults with local overrides.* Configure the client once; each request states only how it differs (a longer timeout, other credentials, a different retry policy). See <<configuration-model>>.
+* *IDE completion and type checking.* The verbs declare their closures with `@DelegatesTo(GroovyRequestBuilder)`, so IntelliJ IDEA completes request methods inside `{ }`, and `@TypeChecked` or `@CompileStatic` code checks them at compile time.
+* *Fail-fast mistakes.* Unknown calls in a request closure, unknown settings in a `SecurityConfig` and invalid values all fail immediately, with a message naming the problem.
+* *Plain Groovy inside.* A request closure is ordinary code: use `if`, loops and your own methods to build it.
++
+[source,groovy]
+----
+client.getSync('/search') {
+    query(q: term)
+    if (page) query(page: page)
+    filters.each { k, v -> query((k): v) }
+}
+----
+
+* *Reuse without inheritance.* Put shared request settings in a method that takes the builder, and call it with `delegate`:
++
+[source,groovy]
+----
+static void tracing(GroovyHttpClient.GroovyRequestBuilder b) {
+    b.header 'X-Request-Id', UUID.randomUUID().toString()
+    b.header 'X-Client', 'orders-service'
+}
+
+client.getSync('/orders') { tracing(delegate); query(status: 'open') }
+----
+
+Settings that apply to every request belong on the client instead: default headers, `auth { }`, default response handlers and interceptors.
+
+==== From Java
+
+Java code uses the same client. The verbs without a closure, the builder and `SecurityConfig` are plain Java APIs; a request closure can be written as a Groovy `Closure` subclass, but if you configure many requests from Java, put the request-building in a small Groovy helper class.
+
+[source,java]
+----
+GroovyHttpClient client = GroovyHttpClient.builder("https://httpbin.org").build();
+GroovyHttpClient.HttpClientResponse r = client.getSync("/get");
+System.out.println(r.getStatusCode());
+----
+
+=== Threads
+
+Each client runs its requests on its own virtual-thread executor. The `++*Sync++` methods are the asynchronous ones followed by a wait, so it costs nothing to block. Response handlers and stream consumers run on the thread that completes the request; blocking inside them is safe.
+
+A client is thread-safe and meant to be shared. Create one per base URL and close it (it is `AutoCloseable`) when the application stops.
