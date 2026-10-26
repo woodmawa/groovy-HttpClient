@@ -4,7 +4,7 @@ import org.softwood.http.features.Feature
 
 import spock.lang.Specification
 
-/** URLBuilder encoding and DSL behaviour that docs/chapters/04-url-builder.adoc relies on (port, path slash, encoding, multi-value params, closure DSL). */
+/** URLBuilder encoding and DSL behaviour that docs/guide/27-url-builder.adoc relies on (port, path slash, encoding, multi-value params, closure DSL). */
 @Feature('url.builder')
 class URLBuilderDocExamplesSpec extends Specification {
 

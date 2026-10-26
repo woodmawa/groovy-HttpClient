@@ -19,7 +19,7 @@ class FeatureCatalogue {
         String title
         String status            // implemented | planned
         String version           // release that shipped it, or the target release while planned
-        String chapter           // docs/chapters file stem, or null
+        String chapter           // docs/guide file stem (user guide chapter), or null
         List<String> protocols   // protocols the integration matrix must prove; [] = protocol-independent
         boolean integration      // true = an integrationTest spec (real Jetty) is required once implemented
         Integer minJdk           // lowest runtime JDK the feature exists on (null = every supported JDK)

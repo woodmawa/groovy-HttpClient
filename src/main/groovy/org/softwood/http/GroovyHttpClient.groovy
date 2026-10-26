@@ -207,6 +207,8 @@ class GroovyHttpClient implements AutoCloseable {
     private final HttpClient httpClient
     private final CookieManager cookieManager
     private final CircuitBreaker circuitBreaker
+    /** Request counters (2.1); every counter stays zero when enableMetrics is off. */
+    private final ClientMetrics metrics
 
     private final boolean allowAbsoluteUrls
     private final Set<String> allowedHosts
@@ -497,6 +499,7 @@ class GroovyHttpClient implements AutoCloseable {
                 config.failureThreshold ?: DEFAULT_FAILURE_THRESHOLD,
                 config.resetTimeoutMs   ?: DEFAULT_RESET_TIMEOUT_MS
         )
+        this.metrics = new ClientMetrics(!!config.enableMetrics)
 
         this.allowAbsoluteUrls = !!config.allowAbsoluteUrls
         Set<String> hosts = new LinkedHashSet<String>(config.allowedHosts ?: [] as Set<String>)
@@ -835,7 +838,20 @@ class GroovyHttpClient implements AutoCloseable {
          * byte[] = application/octet-stream, CharSequence = text/plain, anything else = application/json
          * (all UTF-8). A byte[] is always sent as is. IllegalArgumentException when no encoder handles the type.
          */
+        /**
+         * A markup closure as the body, encoded by the codec for the content type (XML: StreamingMarkupBuilder).
+         * Without this overload Groovy coerces the closure to the Flow.Publisher overload (a SAM type) and the JDK
+         * would subscribe to it instead of encoding it.
+         */
+        void body(Closure markup, String contentType) {
+            encodedBody(markup, contentType)
+        }
+
         void body(Object obj, String contentType = null) {
+            encodedBody(obj, contentType)
+        }
+
+        private void encodedBody(Object obj, String contentType) {
             String ct = contentType ?: defaultContentType(obj)
             MediaType type = MediaType.parse(ct)
             byte[] bytes = obj instanceof byte[] ? (byte[]) obj : codecs.encode(obj, type)
@@ -1660,6 +1676,7 @@ class GroovyHttpClient implements AutoCloseable {
         Closure doAttempt
         doAttempt = { ->
             ctx.attempt = attempt.get()
+            metrics.attemptStarted()
             chain.call(ctx).whenComplete { HttpClientResponse resp, Throwable err ->
                 Throwable cause = (err == null) ? null : unwrapCompletion(err)
                 // SEC-4: the chain now returns 4xx/5xx responses, so status-code retry can actually fire
@@ -1668,6 +1685,7 @@ class GroovyHttpClient implements AutoCloseable {
                         (ctx.streamTarget == null || ctx.streamTarget.retryable) && !ctx.oneShotBody &&
                         (cause == null ? policy.shouldRetry(null, resp) : policy.shouldRetry(cause, null))
                 if (again) {
+                    metrics.retryScheduled()
                     long delayMs = policy.nextDelayMs(attempt.get())
                     if (config.enableLogging) {
                         log.info("[GroovyHttpClient] retrying {} {} in {} ms (attempt {} of {}) after {}", ctx.method,
@@ -2073,32 +2091,71 @@ class GroovyHttpClient implements AutoCloseable {
      * ========================================================================= */
 
     private <T> CompletableFuture<T> executeWithCircuitBreaker(Supplier<CompletableFuture<T>> supplier) {
+        metrics.requestStarted()
         if (!circuitBreaker.tryAcquirePermission()) {
+            metrics.rejectedByCircuit()
             log.warn("Circuit breaker is {} — rejecting request", circuitBreaker.state)
             def f = new CompletableFuture<T>()
             f.completeExceptionally(new CircuitOpenException("Circuit is ${circuitBreaker.state}"))
             return f
         }
 
+        long started = System.nanoTime()
         CompletableFuture<T> fut
         try {
             fut = supplier.get()
         } catch (Throwable t) {
             circuitBreaker.onError(t)
+            metrics.requestFinished(System.nanoTime() - started, 0, t)
             def f = new CompletableFuture<T>()
             f.completeExceptionally(t)
             return f
         }
 
         fut.whenComplete { res, err ->
+            long nanos = System.nanoTime() - started
             if (err == null) {
                 circuitBreaker.onSuccess()
+                metrics.requestFinished(nanos, statusOf(res), null)
                 return
             }
-            circuitBreaker.onError(unwrapCompletion(err))
+            Throwable cause = unwrapCompletion(err)
+            circuitBreaker.onError(cause)
+            metrics.requestFinished(nanos, cause instanceof HttpResponseException ? ((HttpResponseException) cause).statusCode : 0, cause)
         }
         fut
     }
+
+    private static int statusOf(Object result) {
+        if (result instanceof HttpClientResponse) return ((HttpClientResponse) result).statusCode
+        if (result instanceof StreamResult) return ((StreamResult) result).statusCode
+        0
+    }
+
+    /* =========================================================================
+     * Circuit breaker state and metrics (2.1)
+     * ========================================================================= */
+
+    /**
+     * The circuit breaker's state now. OPEN turns into HALF_OPEN lazily: the first request after the reset
+     * timeout becomes the probe, so an idle client reads OPEN until then (see {@link CircuitBreakerStatus#isProbeDue}).
+     */
+    State getCircuitState() { circuitBreaker.state }
+
+    /** A read-only view of the circuit breaker: state, failure count, threshold, reset timeout, timestamps. */
+    CircuitBreakerStatus getCircuitBreakerStatus() { circuitBreaker.status() }
+
+    /**
+     * Calls {@code listener(State from, State to)} on every circuit breaker state change, on the thread that caused
+     * it. Keep it quick; an exception it throws is logged and ignored. Several listeners may be added.
+     */
+    GroovyHttpClient onCircuitStateChange(Closure listener) {
+        if (listener != null) circuitBreaker.listeners << listener
+        this
+    }
+
+    /** This client's request counters; {@code metrics.enabled} is false when built with enableMetrics(false). */
+    ClientMetrics getMetrics() { metrics }
 
     private static boolean isTransient(Throwable t) {
         if (t == null) return false
@@ -2117,7 +2174,9 @@ class GroovyHttpClient implements AutoCloseable {
         parts.each { MultipartPart part ->
             def header =
                     "--${boundary}\r\n" +
-                            "Content-Disposition: form-data; name=\"${MultipartPart.quote(part.name)}\"; filename=\"${MultipartPart.quote(part.filename)}\"\r\n" +
+                            "Content-Disposition: form-data; name=\"${MultipartPart.quote(part.name)}\"" +
+                            // RFC 7578: a filename marks a file upload; without one the part is a plain form field (2.1)
+                            (part.filename ? "; filename=\"${MultipartPart.quote(part.filename)}\"" : '') + "\r\n" +
                             "Content-Type: ${part.contentType}\r\n" +
                             "\r\n"
             byteArrays << header.getBytes("UTF-8")
@@ -2394,6 +2453,28 @@ class GroovyHttpClient implements AutoCloseable {
         private volatile long openStateTime = 0L
         private volatile long lastFailureTime = 0L
         volatile State state = State.CLOSED
+        /** onCircuitStateChange listeners (2.1). */
+        final List<Closure> listeners = new java.util.concurrent.CopyOnWriteArrayList<Closure>()
+
+        private void moveTo(State to) {
+            State from = state
+            state = to
+            if (from == to) return
+            for (Closure l : listeners) {
+                try {
+                    l.call(from, to)
+                } catch (Throwable e) {
+                    log.warn("[GroovyHttpClient] circuit state listener failed ({} -> {}): {}", from, to, e.toString())
+                }
+            }
+        }
+
+        /** A read-only view for GroovyHttpClient.circuitBreakerStatus (2.1). */
+        synchronized CircuitBreakerStatus status() {
+            new CircuitBreakerStatus(state, failureCount.get(), failureThreshold, Duration.ofMillis(resetTimeoutMs),
+                    state == State.OPEN && openStateTime > 0L ? java.time.Instant.ofEpochMilli(openStateTime) : null,
+                    lastFailureTime > 0L ? java.time.Instant.ofEpochMilli(lastFailureTime) : null)
+        }
 
         // Factory used by CircuitBreakerSpec
         static CircuitBreaker create(SecurityConfig config) {
@@ -2411,7 +2492,7 @@ class GroovyHttpClient implements AutoCloseable {
         synchronized boolean canAttemptProbe() {
             if (System.currentTimeMillis() - lastFailureTime > resetTimeoutMs) {
                 if (state != State.HALF_OPEN) {
-                    state = State.HALF_OPEN
+                    moveTo(State.HALF_OPEN)
                     probeInFlight.set(false)
                 }
                 return true
@@ -2423,7 +2504,7 @@ class GroovyHttpClient implements AutoCloseable {
         synchronized void recordSuccess() {
             failureCount.set(0)
             openStateTime = 0L
-            state = State.CLOSED
+            moveTo(State.CLOSED)
             probeInFlight.set(false)
         }
 
@@ -2435,7 +2516,7 @@ class GroovyHttpClient implements AutoCloseable {
             // threshold reached, or the HALF_OPEN probe failed: (re)open
             if (currentFailures >= failureThreshold || state == State.HALF_OPEN) {
                 openStateTime = System.currentTimeMillis()
-                state = State.OPEN
+                moveTo(State.OPEN)
                 probeInFlight.set(false)
             }
         }
@@ -2457,7 +2538,7 @@ class GroovyHttpClient implements AutoCloseable {
             failureCount.set(0)
             openStateTime = 0L
             // keep lastFailureTime for probe logic if spec checks it; otherwise OK
-            state = State.CLOSED
+            moveTo(State.CLOSED)
             probeInFlight.set(false)
         }
 

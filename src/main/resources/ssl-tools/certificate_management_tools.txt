@@ -6,13 +6,13 @@ Quick reference for SSL certificate and keystore management scripts.
 SCRIPTS
 -------
 
-create-keystore.sh / .bat
+create_keystore.sh / .bat
     Generate PKCS12 keystores for development or production use
 
-import-certificate.sh / .bat
+import_certificate.sh / .bat
     Import CA certificates into PKCS12 truststore
 
-convert-pem-to-p12.sh / .bat
+convert_pem_to_p12.sh / .bat
     Convert PEM format certificates to PKCS12 keystore
 
 
@@ -22,33 +22,33 @@ QUICK EXAMPLES
 Development Keystore (Self-Signed)
 -----------------------------------
 Linux/Mac:
-    ./create-keystore.sh --type development --output dev-keystore.p12 \
+    ./create_keystore.sh --type development --output dev-keystore.p12 \
         --password changeit --hostname localhost
 
 Windows:
-    create-keystore.bat --type development --output dev-keystore.p12 ^
+    create_keystore.bat --type development --output dev-keystore.p12 ^
         --password changeit --hostname localhost
 
 
 Import CA Certificate
 ---------------------
 Linux/Mac:
-    ./import-certificate.sh --cert company-ca.crt \
+    ./import_certificate.sh --cert company-ca.crt \
         --truststore company-truststore.p12 --password trustpass
 
 Windows:
-    import-certificate.bat --cert company-ca.crt ^
+    import_certificate.bat --cert company-ca.crt ^
         --truststore company-truststore.p12 --password trustpass
 
 
 Convert PEM to PKCS12 (Client Certificate)
 -------------------------------------------
 Linux/Mac:
-    ./convert-pem-to-p12.sh --input client-cert.pem \
+    ./convert_pem_to_p12.sh --input client-cert.pem \
         --key client-key.pem --output client-keystore.p12 --password secret
 
 Windows:
-    convert-pem-to-p12.bat --input client-cert.pem ^
+    convert_pem_to_p12.bat --input client-cert.pem ^
         --key client-key.pem --output client-keystore.p12 --password secret
 
 

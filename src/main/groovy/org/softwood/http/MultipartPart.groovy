@@ -68,19 +68,21 @@ class MultipartPart {
     // Static factory helpers
     // ---------------------------------------------------------------------
 
+    /** A plain form field (no filename), as an HTML form sends it. 2.1: earlier versions sent {@code name.txt}. */
     static MultipartPart text(String name, String value) {
         new MultipartPart(
                 name,
-                "${name}.txt".toString(),
+                null,
                 "text/plain; charset=UTF-8",
                 (value ?: "").getBytes("UTF-8")
         )
     }
 
+    /** A JSON form field (no filename). 2.1: earlier versions sent {@code name.json}. */
     static MultipartPart json(String name, String json) {
         new MultipartPart(
                 name,
-                "${name}.json".toString(),
+                null,
                 "application/json; charset=UTF-8",
                 (json ?: "").getBytes("UTF-8")
         )
@@ -112,25 +114,27 @@ class MultipartPart {
         /**
          * DSL method:
          *   content "Hello World"
-         * sets data bytes and leaves filename if already set.
+         * sets text data: a plain form field unless a filename is also given (2.1).
          */
         void content(String text) {
             this.data = (text ?: "").getBytes("UTF-8")
-            if (!this.filename) {
-                this.filename = "${name ?: 'part'}.txt".toString()
-            }
+            this.textContent = true
         }
 
+        /** Binary content: an upload; without a filename it is named {@code <name>.bin}. */
         void data(byte[] d) {
             this.data = d ?: new byte[0]
+            this.textContent = false
         }
+
+        private boolean textContent = false
 
         MultipartPart build() {
             if (!name) {
                 throw new IllegalArgumentException("MultipartPart.name is required")
             }
             new MultipartPart(name,
-                    filename ?: "${name}.bin".toString(),
+                    filename ?: (textContent ? null : "${name}.bin".toString()),
                     contentType ?: "application/octet-stream",
                     data ?: new byte[0])
         }

@@ -92,7 +92,12 @@ final class BuiltinCodecs {
         if (body instanceof Closure) {
             def smb = new StreamingMarkupBuilder()
             smb.encoding = cs.name()
-            return smb.bind((Closure) body).toString().getBytes(cs)
+            // A markup closure written inside a request closure has that closure as its owner, whose delegate is the
+            // (strict) request DSL: owner-first resolution would send order(...) there. Delegate-first on a copy
+            // lets the markup builder see every element name first.
+            Closure markup = (Closure) ((Closure) body).clone()
+            markup.resolveStrategy = Closure.DELEGATE_FIRST
+            return smb.bind(markup).toString().getBytes(cs)
         }
         if (body instanceof GPathResult) return XmlUtil.serialize((GPathResult) body).getBytes(cs)
         throw new IllegalArgumentException("XML bodies must be a String, a markup Closure or a GPathResult, got ${body?.getClass()?.name}")
